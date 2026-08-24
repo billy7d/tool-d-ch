@@ -1,0 +1,80 @@
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
+
+
+class TranslationProvider(ABC):
+    @abstractmethod
+    def health_check(self) -> bool:
+        """Returns True if the LLM provider backend is available and responsive."""
+        pass
+
+    @abstractmethod
+    def list_models(self) -> List[str]:
+        """Returns a list of available model names."""
+        pass
+
+    @abstractmethod
+    def translate(
+        self,
+        blocks: List[Dict[str, str]],  # [{"id": "node_1", "text": "..."}]
+        system_prompt: str,
+        user_prompt: str,
+        model: Optional[str] = None,
+        temperature: float = 0.3
+    ) -> List[Dict[str, str]]:  # [{"node_id": "node_1", "text": "..."}]
+        """Translates a batch of semantic text blocks into Vietnamese."""
+        pass
+
+    @abstractmethod
+    def translate_single(
+        self,
+        text: str,
+        system_prompt: str,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.3
+    ) -> str:
+        """Translates a single text block directly into Vietnamese as a robust fallback."""
+        pass
+
+    @abstractmethod
+    def revise(
+        self,
+        source_text: str,
+        current_translation: str,
+        instruction: str,
+        model: Optional[str] = None
+    ) -> str:
+        """Re-translates or refines a specific text block with custom user instructions."""
+        pass
+
+    @abstractmethod
+    def summarize_context(
+        self,
+        text_sample: str,
+        model: Optional[str] = None
+    ) -> str:
+        """Generates chapter memory or document topic summary."""
+        pass
+
+    @abstractmethod
+    def extract_glossary(
+        self,
+        text_sample: str,
+        document_type: str = "GENERAL",
+        model: Optional[str] = None
+    ) -> List[Dict[str, str]]:
+        """Extracts representative domain terms, named entities and suggested translations."""
+        pass
+
+    @abstractmethod
+    def review_translation(
+        self,
+        source_text: str,
+        translated_text: str,
+        glossary_terms: Dict[str, str],
+        model: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Performs AI QA review checking accuracy, terminology, and naturalness."""
+        pass
+

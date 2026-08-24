@@ -1,0 +1,138 @@
+# ==========================================
+# 1. AI Models, Model Weights & Datasets
+# ==========================================
+# Model weight file formats
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.gguf
+*.ggml
+*.tflite
+*.ckpt
+*.h5
+*.model
+*.weights
+*.pb
+*.traineddata
+*.ftz
+*.vec
+*.pkl
+*.pickle
+
+# Model cache & download directories
+models/
+weights/
+checkpoints/
+model_cache/
+.cache/
+cache/
+huggingface/
+torch_cache/
+ollama/
+nltk_data/
+tesseract/
+
+# ==========================================
+# 2. Application Runtime Data, Databases & Logs
+# ==========================================
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Project data and user documents
+data/*
+!data/.gitkeep
+!data/projects/
+data/projects/*
+!data/projects/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Temporary and export directories
+temp/
+tmp/
+exports/
+output/
+uploads/
+
+# ==========================================
+# 3. Python Environment & Bytecode
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Packaging & Distribution
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================================
+# 4. Frontend & Node
+# ==========================================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==========================================
+# 5. Environment Variables & Secrets
+# ==========================================
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+
+# ==========================================
+# 6. IDE & Operating System Files
+# ==========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
