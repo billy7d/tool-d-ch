@@ -134,6 +134,8 @@ export interface Project {
   total_pages: number;
   total_words: number;
   total_nodes: number;
+  translatable_nodes: number;
+  skipped_nodes: number;
   translated_nodes: number;
   progress_percent: number;
   created_at: string;

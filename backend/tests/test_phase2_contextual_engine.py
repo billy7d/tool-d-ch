@@ -66,7 +66,8 @@ def test_context_assembler_trims_low_priority_context_but_keeps_locked_glossary(
         [{"source": "s " * 1000, "target": "t " * 1000}],
     )
     assert context.glossary == {"Federal Reserve": "Cục Dự trữ Liên bang Mỹ"}
-    assert context.token_budget.source_budget >= 240
+    assert context.token_budget.source_budget >= context.token_budget.source_tokens
+    assert context.token_budget.total_estimated_tokens <= 4096
     assert context.few_shots == []
 
 

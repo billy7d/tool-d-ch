@@ -25,6 +25,8 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
   const [status, setStatus] = useState<string>(project.current_stage);
   const [stats, setStats] = useState({
     total_nodes: project.total_nodes || 0,
+    translatable_nodes: project.translatable_nodes || 0,
+    skipped_nodes: project.skipped_nodes || 0,
     translated_nodes: project.translated_nodes || 0,
     failed_nodes: 0,
     needs_review_nodes: 0,
@@ -34,6 +36,8 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
     context_mode: 'CONTEXTUAL_BALANCED',
     retry_count: 0,
     quality_state: 'READY',
+    execution_status: 'IDLE',
+    document_status: project.current_stage,
   });
   const [ollamaOnline, setOllamaOnline] = useState<boolean>(true);
   const prevOllamaRef = useRef<boolean>(true);
@@ -45,6 +49,8 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
       setStats((prev) => ({
         ...prev,
         total_nodes: res.total_nodes,
+        translatable_nodes: res.translatable_nodes,
+        skipped_nodes: res.skipped_nodes,
         translated_nodes: res.translated_nodes,
         failed_nodes: res.failed_nodes,
         needs_review_nodes: res.needs_review_nodes,
@@ -54,6 +60,8 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
         context_mode: res.context_mode || prev.context_mode,
         retry_count: res.retry_count ?? prev.retry_count,
         quality_state: res.quality_state || prev.quality_state,
+        execution_status: res.execution_status || prev.execution_status,
+        document_status: res.document_status || prev.document_status,
       }));
 
       const hw = await apiClient.getHardwareInfo();
@@ -115,12 +123,14 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
     }
   };
 
-  const isRunning = status === 'RUNNING' || status === 'TRANSLATING';
-  const isPaused = status === 'PAUSED';
-  const isCompleted = stats.translated_nodes >= stats.total_nodes && stats.total_nodes > 0;
-  const isAutoHealing = isRunning && stats.failed_nodes > 0 && (stats.translated_nodes + stats.failed_nodes >= stats.total_nodes);
+  const isRunning = stats.execution_status === 'RUNNING';
+  const isPaused = stats.execution_status === 'PAUSED';
+  const isCompleted = stats.document_status === 'TRANSLATED';
+  const isCompletedWithReview = stats.document_status === 'TRANSLATED_WITH_REVIEW';
+  const isTerminal = isCompleted || isCompletedWithReview;
+  const isAutoHealing = isRunning && stats.failed_nodes > 0;
 
-  // Auto-retry when Ollama transitions from Offline to Online without user click
+  // Tự thử lại khi Ollama chuyển từ ngoại tuyến sang trực tuyến.
   useEffect(() => {
     if (!prevOllamaRef.current && ollamaOnline && stats.failed_nodes > 0 && !isRunning) {
       console.log('Ollama is back online! Automatically auto-healing failed nodes...');
@@ -145,7 +155,7 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
           <div>
             <span className="text-xs text-slate-400 font-medium">Trạng thái hiện tại:</span>
             <div className="flex items-center space-x-2 mt-0.5">
-              <span className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-sky-400 animate-ping' : isPaused ? 'bg-amber-400' : isCompleted ? 'bg-emerald-400' : 'bg-slate-500'}`} />
+              <span className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-sky-400 animate-ping' : isPaused || isCompletedWithReview ? 'bg-amber-400' : isCompleted ? 'bg-emerald-400' : 'bg-slate-500'}`} />
               <h3 className="text-lg font-bold text-white uppercase tracking-wide">
                 {isAutoHealing
                   ? 'Đang tự động vá đoạn lỗi (Auto-Healing)...'
@@ -155,6 +165,8 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
                   ? 'Đã tạm dừng'
                   : isCompleted
                   ? 'Hoàn thành bản dịch (100%)'
+                  : isCompletedWithReview
+                  ? 'Đã dịch xong, cần kiểm tra lại'
                   : 'Chưa bắt đầu'}
               </h3>
             </div>
@@ -184,8 +196,8 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
         {/* Stats Grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
           <div className="bg-slate-950 p-4 rounded-xl border border-slate-800/80">
-            <span className="text-slate-500 block">Tổng số đoạn văn</span>
-            <span className="text-white text-base font-bold mt-1 block">{stats.total_nodes}</span>
+            <span className="text-slate-500 block">Node cần dịch</span>
+            <span className="text-white text-base font-bold mt-1 block">{stats.translatable_nodes}</span>
           </div>
           <div className="bg-slate-950 p-4 rounded-xl border border-slate-800/80">
             <span className="text-slate-500 block">Đã dịch thành công</span>
@@ -196,9 +208,9 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
             <span className="text-amber-400 text-base font-bold mt-1 block">{stats.needs_review_nodes}</span>
           </div>
           <div className="bg-slate-950 p-4 rounded-xl border border-slate-800/80">
-            <span className="text-slate-500 block">Đoạn bị lỗi (Failed)</span>
-            <span className={`text-base font-bold mt-1 block ${stats.failed_nodes > 0 ? 'text-amber-400' : 'text-slate-400'}`}>
-              {stats.failed_nodes}
+            <span className="text-slate-500 block">Bỏ qua / không dịch</span>
+            <span className="text-slate-400 text-base font-bold mt-1 block">
+              {stats.skipped_nodes}
             </span>
           </div>
         </div>
@@ -272,10 +284,20 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
           </div>
         )}
 
+        {isCompletedWithReview && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-center space-x-3 text-amber-400">
+            <AlertCircle className="w-5 h-5 shrink-0" />
+            <div className="text-xs">
+              <span className="font-bold uppercase tracking-wide block">Đã kết thúc dịch, còn nội dung cần duyệt</span>
+              <span className="text-slate-300 text-[11px]">Hãy sang bước QA để kiểm tra các node NEEDS_REVIEW; tiến trình dịch hiện không còn chạy nền.</span>
+            </div>
+          </div>
+        )}
+
         {/* Controls */}
         <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-800">
           <div className="flex items-center space-x-3">
-            {!isRunning && !isPaused && (
+            {!isRunning && !isPaused && !isTerminal && (
               <button
                 onClick={handleStart}
                 className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold shadow-lg shadow-sky-500/20 transition-all"

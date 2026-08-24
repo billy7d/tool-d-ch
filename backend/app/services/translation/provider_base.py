@@ -4,6 +4,17 @@ from app.services.translation.model_capabilities import ModelCapabilities, get_m
 
 
 class TranslationProvider(ABC):
+    def configure_context_window(self, context_window: int) -> None:
+        """Khóa context provider theo ngân sách mà engine đã tính."""
+        self._effective_context_window = int(context_window)
+
+    def effective_context_window(self, model_name: str) -> int:
+        configured = getattr(self, "_effective_context_window", None)
+        if configured:
+            return int(configured)
+        capabilities = self.get_model_capabilities(model_name)
+        return min(capabilities.context_window, capabilities.recommended_context_window)
+
     def get_model_capabilities(self, model_name: str) -> ModelCapabilities:
         """Trả về ngân sách ngữ cảnh bảo thủ theo họ model."""
         return get_model_capabilities(model_name)
@@ -37,7 +48,8 @@ class TranslationProvider(ABC):
         system_prompt: str,
         glossary_terms: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
-        temperature: float = 0.3
+        temperature: float = 0.3,
+        user_prompt: Optional[str] = None,
     ) -> str:
         """Translates a single text block directly into Vietnamese as a robust fallback."""
         pass
@@ -57,7 +69,8 @@ class TranslationProvider(ABC):
     def summarize_context(
         self,
         text_sample: str,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        max_input_chars: Optional[int] = 4000,
     ) -> str:
         """Generates chapter memory or document topic summary."""
         pass

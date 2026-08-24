@@ -11,6 +11,7 @@ VIETNAMESE_STOPWORDS = {
     "khi", "về", "theo", "nhưng", "cũng", "sẽ", "tại", "trên", "dưới",
     "công", "ty", "doanh", "thu", "phát", "hành", "phiên", "bản", "mới",
     "sử", "dụng", "để", "tăng", "giảm", "năm", "người", "việc", "thành",
+    "nay", "hoat", "dong", "khong", "duoc", "can", "phai", "nen", "da",
 }
 
 ENGLISH_STOPWORDS = {
@@ -18,6 +19,9 @@ ENGLISH_STOPWORDS = {
     "be", "been", "to", "of", "in", "on", "for", "with", "from", "by",
     "this", "that", "these", "those", "it", "its", "as", "at", "not",
     "also", "company", "increased", "revenue", "expanded", "overseas",
+    "can", "cannot", "could", "would", "should", "must", "shall", "may",
+    "have", "has", "had", "do", "does", "did", "will", "into", "through",
+    "enables", "between", "without", "within", "after", "before", "during",
 }
 
 WORD_PATTERN = re.compile(r"[A-Za-zÀ-ỹĐđ]+(?:[-'][A-Za-zÀ-ỹĐđ]+)*", re.UNICODE)
@@ -76,7 +80,10 @@ def validate_target_language(
 
     clearly_english = en_hits >= 2 and en_hits > (vi_hits + diacritic_hits) * 1.35
     mixed_english = total >= 8 and en_hits >= 3 and english_score >= 0.28 and vietnamese_score < 0.35
-    if clearly_english or mixed_english:
+    source_words = {word.lower() for word in WORD_PATTERN.findall(URL_OR_IDENTIFIER_PATTERN.sub(" ", source_text or ""))}
+    lexical_overlap = sum(word in source_words for word in words) / max(total, 1)
+    untranslated_phrase = total >= 5 and lexical_overlap >= 0.8 and vi_hits == 0 and diacritic_hits == 0
+    if clearly_english or mixed_english or untranslated_phrase:
         return TargetLanguageValidationResult(
             False,
             "WRONG_TARGET_LANGUAGE",

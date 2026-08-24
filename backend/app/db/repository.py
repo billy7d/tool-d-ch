@@ -31,6 +31,7 @@ from app.models.canonical import (
     SourceMapping,
     NodeMetadata,
 )
+from app.services.translation.node_policy import translatable_values
 
 
 class ProjectRepository:
@@ -95,15 +96,20 @@ class ProjectRepository:
         from app.db.engine import get_project_db
         try:
             pdb = get_project_db(project_id)
+            translatable_types = tuple(translatable_values())
             total_nodes = pdb.query(func.count(NodeModel.id)).filter(NodeModel.project_id == project_id).scalar() or 0
+            translatable_nodes = pdb.query(func.count(NodeModel.id)).filter(
+                NodeModel.project_id == project_id,
+                NodeModel.node_type.in_(translatable_types),
+            ).scalar() or 0
             translated_nodes = pdb.query(func.count(NodeModel.id)).filter(
-                and_(NodeModel.project_id == project_id, NodeModel.status.in_(["TRANSLATED", "QA_PASSED"]))
+                and_(NodeModel.project_id == project_id, NodeModel.node_type.in_(translatable_types), NodeModel.status.in_(["TRANSLATED", "QA_PASSED"]))
             ).scalar() or 0
             failed_nodes = pdb.query(func.count(NodeModel.id)).filter(
-                and_(NodeModel.project_id == project_id, NodeModel.status == "FAILED")
+                and_(NodeModel.project_id == project_id, NodeModel.node_type.in_(translatable_types), NodeModel.status == "FAILED")
             ).scalar() or 0
             needs_review_nodes = pdb.query(func.count(NodeModel.id)).filter(
-                and_(NodeModel.project_id == project_id, NodeModel.status == "NEEDS_REVIEW")
+                and_(NodeModel.project_id == project_id, NodeModel.node_type.in_(translatable_types), NodeModel.status == "NEEDS_REVIEW")
             ).scalar() or 0
             
             doc_stats = pdb.query(
@@ -113,19 +119,27 @@ class ProjectRepository:
             
             total_pages = (doc_stats[0] if doc_stats else 0) or 0
             total_words = (doc_stats[1] if doc_stats else 0) or 0
-            progress_percent = (translated_nodes / total_nodes * 100.0) if total_nodes > 0 else 0.0
+            skipped_nodes = max(0, total_nodes - translatable_nodes)
+            terminal_nodes = translated_nodes + failed_nodes + needs_review_nodes
+            progress_percent = (translated_nodes / translatable_nodes * 100.0) if translatable_nodes > 0 else 100.0
             pdb.close()
         except Exception:
             total_nodes = 0
+            translatable_nodes = 0
             translated_nodes = 0
             failed_nodes = 0
             needs_review_nodes = 0
             total_pages = 0
             total_words = 0
             progress_percent = 0.0
+            skipped_nodes = 0
+            terminal_nodes = 0
 
         return {
             "total_nodes": total_nodes,
+            "translatable_nodes": translatable_nodes,
+            "skipped_nodes": skipped_nodes,
+            "terminal_nodes": terminal_nodes,
             "translated_nodes": translated_nodes,
             "failed_nodes": failed_nodes,
             "needs_review_nodes": needs_review_nodes,

@@ -1,8 +1,16 @@
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from app.models.canonical import DocumentNode, NodeType
 from app.services.translation.context_assembler import estimate_tokens
+from app.services.translation.node_policy import NON_TRANSLATABLE_NODE_TYPES
+
+
+@dataclass(frozen=True)
+class TextSegment:
+    text: str
+    separator_after: str = " "
 
 
 class SemanticChunk:
@@ -12,15 +20,17 @@ class SemanticChunk:
         nodes: List[DocumentNode],
         estimated_tokens: int = 0,
         oversized_segments: Optional[Dict[str, List[str]]] = None,
+        segment_layouts: Optional[Dict[str, List[TextSegment]]] = None,
     ):
         self.chunk_id = chunk_id
         self.nodes = nodes
         self.estimated_tokens = estimated_tokens
         self.oversized_segments = oversized_segments or {}
+        self.segment_layouts = segment_layouts or {}
 
 
 class AdaptiveSemanticChunker:
-    NON_TRANSLATABLE = {NodeType.IMAGE, NodeType.HORIZONTAL_RULE, NodeType.PAGE_BREAK_HINT, NodeType.CODE_BLOCK}
+    NON_TRANSLATABLE = NON_TRANSLATABLE_NODE_TYPES
     ISOLATED = {NodeType.TABLE, NodeType.FOOTNOTE}
 
     @staticmethod
@@ -56,6 +66,44 @@ class AdaptiveSemanticChunker:
         return parts
 
     @classmethod
+    def split_with_layout(cls, text: str, max_tokens: int) -> List[TextSegment]:
+        if max_tokens < 1:
+            return []
+        pieces = re.split(r"(\n{2,}|\n|(?<=[.!?;:])\s+)", text)
+        units: List[TextSegment] = []
+        index = 0
+        while index < len(pieces):
+            content = pieces[index]
+            separator = pieces[index + 1] if index + 1 < len(pieces) else ""
+            index += 2
+            if content:
+                units.append(TextSegment(content, separator))
+        result: List[TextSegment] = []
+        current_text = ""
+        current_separator = ""
+        for unit in units:
+            candidate = current_text + current_separator + unit.text
+            if current_text and cls.estimate_tokens(candidate) > max_tokens:
+                result.append(TextSegment(current_text, current_separator))
+                current_text = unit.text
+                current_separator = unit.separator_after
+            elif cls.estimate_tokens(unit.text) > max_tokens:
+                if current_text:
+                    result.append(TextSegment(current_text, current_separator))
+                    current_text = ""
+                    current_separator = ""
+                subparts = cls.split_sentences(unit.text, max_tokens)
+                for sub_index, subpart in enumerate(subparts):
+                    separator = unit.separator_after if sub_index == len(subparts) - 1 else " "
+                    result.append(TextSegment(subpart, separator))
+            else:
+                current_text = candidate
+                current_separator = unit.separator_after
+        if current_text:
+            result.append(TextSegment(current_text, current_separator))
+        return result
+
+    @classmethod
     def chunk_nodes(
         cls,
         nodes: List[DocumentNode],
@@ -87,11 +135,13 @@ class AdaptiveSemanticChunker:
             if node_tokens > hard_limit:
                 flush()
                 segments = cls.split_sentences(node.content, hard_limit)
+                layouts = cls.split_with_layout(node.content, hard_limit)
                 chunks.append(SemanticChunk(
                     f"chunk_{chunk_index:05d}",
                     [node],
                     max(cls.estimate_tokens(part) for part in segments),
                     {node.id: segments},
+                    {node.id: layouts},
                 ))
                 chunk_index += 1
                 continue

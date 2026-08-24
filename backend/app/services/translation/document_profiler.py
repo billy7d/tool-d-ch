@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-DOCUMENT_PROFILE_VERSION = "document-profile-v1"
+DOCUMENT_PROFILE_VERSION = "document-profile-v2"
 
 
 @dataclass
@@ -49,7 +49,7 @@ class DocumentProfiler:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def stratified_sample(nodes: List[Any], max_chars: int = 7000) -> str:
+    def stratified_sample(nodes: List[Any], max_chars: int = 4000) -> str:
         usable = [node for node in nodes if _node_text(node)]
         if not usable:
             return ""
@@ -61,7 +61,8 @@ class DocumentProfiler:
             if "heading" in node_type:
                 indexes.add(index)
         selected = [_node_text(usable[index]) for index in sorted(indexes)]
-        return "\n\n".join(selected)[:max_chars]
+        quota = max(120, max_chars // max(1, len(selected)))
+        return "\n\n".join(text[:quota] for text in selected)[:max_chars]
 
     @staticmethod
     def fallback_profile(document_type: str, sample: str, custom_instructions: str = "") -> DocumentTranslationProfile:
@@ -124,7 +125,11 @@ class DocumentProfiler:
         profile = cls.fallback_profile(document_type, sample, custom_instructions)
         if provider and sample:
             try:
-                summary = provider.summarize_context(sample, model=model_name)
+                try:
+                    summary = provider.summarize_context(sample, model=model_name, max_input_chars=len(sample))
+                except TypeError:
+                    # Tương thích provider cũ trong khi toàn bộ provider được nâng cấp dần.
+                    summary = provider.summarize_context(sample, model=model_name)
                 if summary:
                     profile.summary = summary[:2400]
             except Exception:

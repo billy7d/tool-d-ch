@@ -67,7 +67,7 @@ class OllamaProvider(TranslationProvider):
                 "temperature": temperature,
                 "top_p": 0.9,
                 "repeat_penalty": 1.1,
-                "num_ctx": capabilities.recommended_context_window,
+                "num_ctx": self.effective_context_window(target_model),
             }
         }
 
@@ -96,7 +96,8 @@ class OllamaProvider(TranslationProvider):
         system_prompt: str,
         glossary_terms: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
-        temperature: float = 0.15
+        temperature: float = 0.15,
+        user_prompt: Optional[str] = None,
     ) -> str:
         """
         Direct single-node translation with ultra-high reliability.
@@ -109,7 +110,7 @@ class OllamaProvider(TranslationProvider):
         if glossary_terms:
             glossary_hint = "Thuật ngữ bắt buộc:\n" + "\n".join([f"- \"{k}\": \"{v}\"" for k, v in glossary_terms.items()]) + "\n\n"
 
-        usr_msg = (
+        usr_msg = user_prompt or (
             f"{glossary_hint}"
             f"Hãy dịch chính xác đoạn văn bản tiếng Anh sau sang tiếng Việt xuất bản tự nhiên, hoàn chỉnh:\n\n"
             f"{text}\n\n"
@@ -133,7 +134,7 @@ class OllamaProvider(TranslationProvider):
                 "temperature": temperature,
                 "top_p": 0.85,
                 "repeat_penalty": 1.25,
-                "num_ctx": capabilities.recommended_context_window,
+                "num_ctx": self.effective_context_window(target_model),
             }
         }
 
@@ -200,7 +201,7 @@ class OllamaProvider(TranslationProvider):
                 "temperature": 0.15,
                 "top_p": 0.85,
                 "repeat_penalty": 1.25,
-                "num_ctx": capabilities.recommended_context_window,
+                "num_ctx": self.effective_context_window(target_model),
             }
         }
 
@@ -222,14 +223,14 @@ class OllamaProvider(TranslationProvider):
         return current_translation
 
 
-    def summarize_context(self, text_sample: str, model: Optional[str] = None) -> str:
+    def summarize_context(self, text_sample: str, model: Optional[str] = None, max_input_chars: Optional[int] = 4000) -> str:
         target_model = model or self.default_model
         sys_msg = "Summarize the key topic, main characters/entities, terminology, and tone of this section in 3-4 bullet points (in Vietnamese)."
         payload = {
             "model": target_model,
             "messages": [
                 {"role": "system", "content": sys_msg},
-                {"role": "user", "content": text_sample[:3000]}
+                {"role": "user", "content": text_sample[:max_input_chars] if max_input_chars else text_sample}
             ],
             "stream": False,
             "keep_alive": "60m",

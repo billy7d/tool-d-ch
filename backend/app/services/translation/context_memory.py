@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.models import NodeModel
 
 
-CHAPTER_MEMORY_VERSION = "chapter-memory-v1"
+CHAPTER_MEMORY_VERSION = "chapter-memory-v2"
 
 
 @dataclass
@@ -65,7 +65,9 @@ class ChapterMemoryBuilder:
             text = str(getattr(node, "content", "") or "")
             if "heading" in node_type or len(re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", text)) >= 2:
                 indexes.add(index)
-        return "\n\n".join(str(getattr(usable[index], "content", "")) for index in sorted(indexes))[:max_chars]
+        selected = [str(getattr(usable[index], "content", "")) for index in sorted(indexes)]
+        quota = max(120, max_chars // max(1, len(selected)))
+        return "\n\n".join(text[:quota] for text in selected)[:max_chars]
 
     @staticmethod
     def _entities(sample: str, glossary: Dict[str, str]) -> List[Dict[str, str]]:
@@ -108,18 +110,31 @@ class ChapterMemoryBuilder:
 
         sample = cls.stratified_sample(nodes)
         summary = f"Chương '{chapter_title}' và các chủ đề liên quan."
+        structured: Dict[str, Any] = {}
         if provider and sample:
             try:
-                generated = provider.summarize_context(sample, model=model_name)
+                generated = provider.summarize_context(sample, model=model_name, max_input_chars=len(sample))
                 if generated:
-                    summary = generated[:2400]
+                    try:
+                        structured = json.loads(generated)
+                        if isinstance(structured, dict):
+                            summary = str(structured.get("summary") or summary)[:2400]
+                        else:
+                            structured = {}
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        structured = {}
+                        summary = generated[:2400]
             except Exception:
-                pass
+                structured = {}
         memory = ChapterMemory(
             summary=summary,
-            entities=cls._entities(sample, glossary or {}),
-            tone="Giữ nhất quán với document profile và phần đã dịch.",
-            terminology=[{"source": key, "preferred": value} for key, value in (glossary or {}).items() if key.lower() in sample.lower()][:30],
+            entities=structured.get("entities") or cls._entities(sample, glossary or {}),
+            key_concepts=structured.get("key_concepts") or [],
+            tone=str(structured.get("tone") or "Giữ nhất quán với document profile và phần đã dịch."),
+            pronoun_notes=structured.get("pronoun_notes") or [],
+            terminology=structured.get("terminology") or [{"source": key, "preferred": value} for key, value in (glossary or {}).items() if key.lower() in sample.lower()][:30],
+            important_facts=structured.get("important_facts") or [],
+            style_notes=structured.get("style_notes") or [],
             generated_at=datetime.now(timezone.utc).isoformat(),
             source_hash=digest,
         )

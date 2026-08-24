@@ -56,7 +56,8 @@ class MockProvider(TranslationProvider):
         system_prompt: str,
         glossary_terms: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
-        temperature: float = 0.3
+        temperature: float = 0.3,
+        user_prompt: Optional[str] = None,
     ) -> str:
         vi_text = f"[Bản dịch tiếng Việt] {text}"
         for en, vi in self.SAMPLE_DICTIONARY.items():
@@ -78,7 +79,7 @@ class MockProvider(TranslationProvider):
     ) -> str:
         return f"{current_translation} (Đã chỉnh sửa theo yêu cầu: {instruction})"
 
-    def summarize_context(self, text_sample: str, model: Optional[str] = None) -> str:
+    def summarize_context(self, text_sample: str, model: Optional[str] = None, max_input_chars: Optional[int] = 4000) -> str:
         return "- Chủ đề: Tài chính và Đầu tư\n- Thuật ngữ chính: Dòng tiền, Lãi kép\n- Văn phong: Tự nhiên, rõ ràng"
 
     def extract_glossary(

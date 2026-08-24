@@ -2,20 +2,19 @@ from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any, Optional
 
 from app.db.engine import get_project_db
-from app.db.models import NodeModel, QAIssueModel, GlossaryModel
+from app.db.models import NodeModel, ChapterModel, QAIssueModel, GlossaryModel
 from app.db.repository import QARepository, ProjectRepository, TranslationRepository
 from app.models.schemas import QAIssueResponse, QAIssueUpdate, ConsistencyScanResponse, RetranslateNodeRequest
-from app.models.canonical import TranslationMode
 from app.services.qa.deterministic_qa import DeterministicQA
 from app.services.qa.ai_qa import AIQAEngine
 from app.services.qa.consistency_scanner import ConsistencyScanner
 from app.services.translation.worker import translation_worker
-from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
 from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.translation_memory import TranslationMemoryService
-from app.services.translation.quality_gate import TranslationQualityGate
-from app.services.translation.translation_signature import build_translation_signature
+from app.services.translation.contextual_engine import ContextualTranslationEngine
+from app.services.translation.translation_config import TranslationConfig
+from app.services.translation.translation_signature import build_translation_signature_from_config
 
 router = APIRouter(prefix="/api/projects/{project_id}/qa", tags=["QA"])
 
@@ -180,10 +179,7 @@ def retranslate_all_qa_issues(
     project_id: str,
     payload: Optional[RetranslateNodeRequest] = None
 ):
-    """
-    Automatically re-translates all nodes that have open QA issues with AI,
-    cleans formatting, removes Chinese characters, resolves issues, and broadcasts progress.
-    """
+    """Dịch lại các node có lỗi QA bằng đúng engine và quality path chuẩn."""
     db = get_project_db(project_id)
     try:
         issues = db.query(QAIssueModel).filter(
@@ -206,36 +202,21 @@ def retranslate_all_qa_issues(
         custom_model = payload.custom_model if payload else None
         custom_instruction = payload.instruction if payload else None
         
-        model_name = custom_model or (proj.selected_model if proj else "qwen2.5:7b")
         instruction = custom_instruction or "Dịch lại trọn vẹn, tự nhiên hơn, chuẩn văn phong xuất bản và đúng ngữ cảnh."
-
-        provider = translation_worker.get_provider(model_name)
-        locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
-
-        doc_type = proj.document_type if proj else "GENERAL"
-        mode_val = proj.translation_mode if proj else "NATURAL"
         try:
-            tr_mode = TranslationMode(mode_val)
-        except Exception:
-            tr_mode = TranslationMode.NATURAL
-
-        sys_prompt = PromptBuilder.build_system_prompt(
-            document_type=doc_type,
-            translation_mode=tr_mode,
-            style_guide=proj.style_guide if proj else None,
-            custom_instructions=instruction
+            PromptBuilder.validate_custom_instructions(instruction)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        config = TranslationConfig.from_project(
+            proj,
+            model_override=custom_model,
+            custom_instruction_override=instruction,
         )
-
-        signature = build_translation_signature(
-            source_language=proj.source_language or "en",
-            target_language=proj.target_language or "vi",
-            translation_mode=tr_mode.value,
-            document_type=doc_type,
-            style_guide=proj.style_guide or {},
-            locked_glossary=locked_glossary,
-        )
+        provider = translation_worker.get_provider(config.model_name)
+        locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
+        engine = ContextualTranslationEngine(db, proj, provider, config, locked_glossary)
+        signature = build_translation_signature_from_config(config, locked_glossary)
         trans_repo = TranslationRepository(db)
-        quality_gate = TranslationQualityGate()
         fixed_count = 0
         total_nodes = len(node_ids)
 
@@ -245,43 +226,44 @@ def retranslate_all_qa_issues(
                 continue
 
             try:
-                tr_single = provider.translate_single(
-                    text=node.content,
-                    system_prompt=sys_prompt,
-                    glossary_terms=locked_glossary,
-                    model=model_name,
-                    temperature=0.15
+                chapter = db.query(ChapterModel).filter(ChapterModel.id == node.chapter_id).first()
+                node_issues = [
+                    {"code": issue.issue_type, "message": issue.message}
+                    for issue in issues if issue.node_id == nid
+                ]
+                if not chapter:
+                    node.status = "NEEDS_REVIEW"
+                    db.commit()
+                    continue
+                result = engine.repair_node(chapter, engine.canonical_node(node), node_issues)
+                probe = NodeModel(content=node.content, translated_content=result.translated_text)
+                deterministic_issues = DeterministicQA.audit_node(probe)
+                if not result.passed or deterministic_issues:
+                    node.status = "NEEDS_REVIEW"
+                    db.commit()
+                    continue
+                trans_repo.save_node_translation(
+                    node_id=nid,
+                    project_id=project_id,
+                    translated_text=result.translated_text,
+                    model_name=f"{config.model_name} (Bulk QA Fix)",
+                    instruction=instruction,
+                    created_by="qa_bulk_fix",
+                    prompt_version=signature.prompt_version,
                 )
-                if tr_single:
-                    tr_single = VietnamesePostProcessor.normalize_safely(tr_single)
-                    gate = quality_gate.validate(node.content, tr_single, locked_glossary)
-                    probe = NodeModel(content=node.content, translated_content=tr_single)
-                    deterministic_issues = DeterministicQA.audit_node(probe)
-                    if not gate.passed or deterministic_issues:
-                        node.status = "NEEDS_REVIEW"
-                        db.commit()
-                        continue
-                    trans_repo.save_node_translation(
-                        node_id=nid,
-                        project_id=project_id,
-                        translated_text=tr_single,
-                        model_name=f"{model_name} (Bulk QA Fix)",
-                        instruction=instruction,
-                        created_by="qa_bulk_fix"
-                    )
-                    TranslationMemoryService.store(
-                        db=db,
-                        source_text=node.content,
-                        translated_text=tr_single,
-                        style_hash=signature.style_hash,
-                        glossary_hash=signature.glossary_hash,
-                        model_name=model_name,
-                        prompt_version=signature.prompt_version,
-                    )
-                    fixed_count += 1
-                    for issue in issues:
-                        if issue.node_id == nid:
-                            issue.status = "RESOLVED"
+                TranslationMemoryService.store(
+                    db=db,
+                    source_text=node.content,
+                    translated_text=result.translated_text,
+                    style_hash=signature.style_hash,
+                    glossary_hash=signature.glossary_hash,
+                    model_name=config.model_name,
+                    prompt_version=signature.prompt_version,
+                )
+                fixed_count += 1
+                for issue in issues:
+                    if issue.node_id == nid:
+                        issue.status = "RESOLVED"
             except Exception as e_node:
                 print(f"[QA Bulk Fix] Error fixing node {nid}: {e_node}")
 

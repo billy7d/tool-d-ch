@@ -95,14 +95,15 @@ class OpenAILocalProvider(TranslationProvider):
         system_prompt: str,
         glossary_terms: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
-        temperature: float = 0.2
+        temperature: float = 0.2,
+        user_prompt: Optional[str] = None,
     ) -> str:
         target_model = model or self.default_model
         glossary_hint = ""
         if glossary_terms:
             glossary_hint = "Thuật ngữ bắt buộc:\n" + "\n".join([f"- \"{k}\": \"{v}\"" for k, v in glossary_terms.items()]) + "\n\n"
 
-        usr_msg = (
+        usr_msg = user_prompt or (
             f"{glossary_hint}"
             f"Hãy dịch chính xác đoạn văn bản sau sang tiếng Việt tự nhiên, chuẩn xác, đúng ngữ pháp:\n\n"
             f"{text}\n\n"
@@ -168,7 +169,7 @@ class OpenAILocalProvider(TranslationProvider):
 
 
 
-    def summarize_context(self, text_sample: str, model: Optional[str] = None) -> str:
+    def summarize_context(self, text_sample: str, model: Optional[str] = None, max_input_chars: Optional[int] = 4000) -> str:
         return ""
 
     def extract_glossary(self, text_sample: str, document_type: str = "GENERAL", model: Optional[str] = None) -> List[Dict[str, str]]:

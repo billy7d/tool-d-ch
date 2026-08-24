@@ -58,6 +58,8 @@ class ProjectResponse(BaseModel):
     total_pages: int = 0
     total_words: int = 0
     total_nodes: int = 0
+    translatable_nodes: int = 0
+    skipped_nodes: int = 0
     translated_nodes: int = 0
     progress_percent: float = 0.0
     created_at: datetime
@@ -134,6 +136,8 @@ class TranslationStatusResponse(BaseModel):
     project_id: str
     status: str  # PENDING, RUNNING, PAUSED, COMPLETED, FAILED
     total_nodes: int
+    translatable_nodes: int = 0
+    skipped_nodes: int = 0
     translated_nodes: int
     failed_nodes: int
     needs_review_nodes: int
@@ -145,6 +149,8 @@ class TranslationStatusResponse(BaseModel):
     context_mode: Optional[str] = None
     retry_count: int = 0
     quality_state: Optional[str] = None
+    execution_status: str = "IDLE"
+    document_status: str = "TRANSLATION_CONFIGURED"
 
 
 # Glossary Schemas

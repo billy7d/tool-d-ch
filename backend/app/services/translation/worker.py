@@ -4,35 +4,19 @@ import threading
 import json
 import os
 from typing import Dict, Any, Optional, Callable, List
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
-
 from app.db.engine import get_project_db
 from app.db.models import ProjectModel, ChapterModel, NodeModel
-from app.db.repository import ProjectRepository, StructureRepository, TranslationRepository
-from app.models.canonical import DocumentNode, NodeType, NodeStatus, TranslationMode
+from app.db.repository import ProjectRepository, TranslationRepository
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.ollama_provider import OllamaProvider
 from app.services.translation.mock_provider import MockProvider
-from app.services.translation.chunker import SemanticChunker
 from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.translation_memory import TranslationMemoryService
 from app.services.translation.glossary_service import GlossaryService
-from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
-from app.services.translation.json_parser import validate_translation_batch
-from app.services.translation.quality_gate import TranslationQualityGate
-from app.services.translation.translation_signature import build_translation_signature
-from app.services.translation.document_profiler import DocumentProfiler
-from app.services.translation.context_memory import ChapterMemoryBuilder, RollingContextService
-from app.services.translation.context_assembler import ContextAssembler
-from app.services.translation.prompt_profiles import select_few_shots
-from app.config import settings
-
-
-MAX_TRANSLATION_REPAIR_ATTEMPTS = 2
-
-
-
+from app.services.translation.contextual_engine import ContextualTranslationEngine
+from app.services.translation.translation_config import TranslationConfig
+from app.services.translation.translation_signature import build_translation_signature_from_config
+from app.services.translation.node_policy import translatable_values
 
 
 class TranslationWorker:
@@ -144,11 +128,13 @@ class TranslationWorker:
     def pause_translation(self, project_id: str):
         if project_id in self.pause_tasks:
             self.pause_tasks[project_id].set()
+            self.telemetry.setdefault(project_id, {})["execution_status"] = "PAUSED"
             self.broadcast_event("TRANSLATION_PAUSED", {"project_id": project_id})
 
     def resume_translation(self, project_id: str):
         if project_id in self.pause_tasks:
             self.pause_tasks[project_id].clear()
+            self.telemetry.setdefault(project_id, {})["execution_status"] = "RUNNING"
             self.broadcast_event("TRANSLATION_RESUMED", {"project_id": project_id})
 
     def stop_translation(self, project_id: str):
@@ -156,11 +142,24 @@ class TranslationWorker:
             self.running_tasks[project_id].clear()
         if project_id in self.pause_tasks:
             self.pause_tasks[project_id].clear()
+        self.telemetry.setdefault(project_id, {})["execution_status"] = "STOPPED"
+        db = get_project_db(project_id)
+        try:
+            project = db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+            if project and project.current_stage == "TRANSLATING":
+                project.current_stage = "TRANSLATION_CONFIGURED"
+                db.commit()
+        finally:
+            db.close()
         self.broadcast_event("TRANSLATION_STOPPED", {"project_id": project_id})
 
     def retry_failed(self, project_id: str):
         db = get_project_db(project_id)
+        model_name = "qwen2.5:7b"
         try:
+            project = db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+            if project and project.selected_model:
+                model_name = project.selected_model
             failed_nodes = db.query(NodeModel).filter(
                 NodeModel.project_id == project_id,
                 NodeModel.status.in_(["FAILED", "NEEDS_REVIEW"])
@@ -170,7 +169,7 @@ class TranslationWorker:
             db.commit()
         finally:
             db.close()
-        self.start_translation(project_id)
+        self.start_translation(project_id, model_name=model_name)
 
     def _wait_for_ollama_recovery(self, provider: TranslationProvider, stop_event: threading.Event, project_id: str, max_wait_sec: int = 180) -> bool:
         """
@@ -194,122 +193,6 @@ class TranslationWorker:
             wait_interval = min(10.0, wait_interval * 1.5)
         return False
 
-    @staticmethod
-    def _validation_prompt(system_prompt: str, issues: List[Dict[str, str]], attempt: int) -> str:
-        details = "\n".join(f"- {issue['code']}: {issue['message']}" for issue in issues)
-        return (
-            f"{system_prompt}\n\n"
-            "Your previous translation did not pass validation.\n"
-            "Translate the ORIGINAL SOURCE again from beginning to end.\n\n"
-            f"Validation errors (attempt {attempt}):\n{details}\n\n"
-            "Requirements:\n"
-            "- Translate every proposition from the source.\n"
-            "- Do not summarize or omit sentences, clauses, numbers, dates or references.\n"
-            "- Vietnamese prose must be in Vietnamese.\n"
-            "- Proper nouns, trademarks, acronyms, URLs, code and identifiers may remain unchanged.\n"
-            "- Return only the translation."
-        )
-
-    def _store_valid_candidate(
-        self,
-        db: Session,
-        trans_repo: TranslationRepository,
-        project_id: str,
-        node: DocumentNode,
-        candidate: str,
-        model_name: str,
-        locked_glossary: Dict[str, str],
-        signature,
-        label: str = "",
-    ):
-        normalized = VietnamesePostProcessor.normalize_safely(candidate or "")
-        gate = TranslationQualityGate().validate(node.content, normalized, locked_glossary)
-        if not gate.passed:
-            return False, normalized, gate
-
-        trans_repo.save_node_translation(
-            node_id=node.id,
-            project_id=project_id,
-            translated_text=normalized,
-            model_name=f"{model_name}{label}",
-            prompt_version=signature.prompt_version,
-        )
-        TranslationMemoryService.store(
-            db=db,
-            source_text=node.content,
-            translated_text=normalized,
-            style_hash=signature.style_hash,
-            glossary_hash=signature.glossary_hash,
-            model_name=model_name,
-            prompt_version=signature.prompt_version,
-        )
-        return True, normalized, gate
-
-    def _retry_invalid_node(
-        self,
-        db: Session,
-        trans_repo: TranslationRepository,
-        provider: TranslationProvider,
-        project_id: str,
-        node: DocumentNode,
-        model_name: str,
-        system_prompt: str,
-        locked_glossary: Dict[str, str],
-        signature,
-        initial_issues: List[Dict[str, str]],
-        stop_event: threading.Event,
-    ) -> bool:
-        issues = initial_issues
-        for attempt in range(1, MAX_TRANSLATION_REPAIR_ATTEMPTS + 1):
-            if not stop_event.is_set():
-                return False
-            self.broadcast_event("TRANSLATION_RETRYING", {
-                "project_id": project_id,
-                "node_id": node.id,
-                "attempt": attempt,
-                "issues": [issue["code"] for issue in issues],
-            })
-            try:
-                started = time.time()
-                candidate = provider.translate_single(
-                    text=node.content,
-                    system_prompt=self._validation_prompt(system_prompt, issues, attempt),
-                    glossary_terms=locked_glossary,
-                    model=model_name,
-                    temperature=0.1 if attempt == 1 else 0.0,
-                )
-                saved, _, gate = self._store_valid_candidate(
-                    db, trans_repo, project_id, node, candidate, model_name,
-                    locked_glossary, signature, label=f" (Validation Retry {attempt})",
-                )
-                print(
-                    "[TranslationValidation] "
-                    f"project={project_id} node={node.id} model={model_name} attempt={attempt} "
-                    f"issues={[issue['code'] for issue in gate.issues]} "
-                    f"latency={time.time() - started:.3f} result={'PASS' if saved else 'FAIL'}"
-                )
-                if saved:
-                    return True
-                issues = gate.issues
-            except Exception as exc:
-                issues = [{
-                    "code": "TRANSLATION_PROVIDER_ERROR",
-                    "severity": "ERROR",
-                    "message": str(exc),
-                }]
-
-        db_node = db.query(NodeModel).filter(NodeModel.id == node.id).first()
-        if db_node:
-            db_node.status = "NEEDS_REVIEW"
-            db.commit()
-        self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
-            "project_id": project_id,
-            "node_id": node.id,
-            "attempt": MAX_TRANSLATION_REPAIR_ATTEMPTS,
-            "issues": [issue["code"] for issue in issues],
-        })
-        return False
-
     def _run_translation_loop(
         self,
         project_id: str,
@@ -323,347 +206,186 @@ class TranslationWorker:
         provider = override_provider or self.get_provider(model_name)
         trans_repo = TranslationRepository(db)
         proj_repo = ProjectRepository(db)
-
+        project = None
+        systemic_failure = False
+        self.telemetry.setdefault(project_id, {})["execution_status"] = "RUNNING"
         try:
             project = proj_repo.get_project(project_id)
             if not project:
                 return
-
-            # Check provider health before proceeding, wait briefly if momentarily initializing
             if not provider.health_check():
                 recovered = self._wait_for_ollama_recovery(provider, stop_event, project_id, max_wait_sec=20)
                 if not recovered:
-                    err_msg = "Không thể kết nối đến Ollama (http://localhost:11434). Vui lòng khởi động Ollama trên Windows hoặc kiểm tra kết nối."
-                    print(f"[Translation Worker] Health check failed: {err_msg}")
+                    systemic_failure = True
+                    project.current_stage = "TRANSLATION_FAILED"
+                    db.commit()
                     self.broadcast_event("TRANSLATION_ERROR", {
                         "project_id": project_id,
-                        "error_type": "OLLAMA_OFFLINE",
-                        "message": err_msg
+                        "error_type": "PROVIDER_OFFLINE",
+                        "message": "Không thể kết nối provider dịch local.",
                     })
-                    project.current_stage = "TRANSLATION_CONFIGURED"
-                    db.commit()
                     return
 
+            config = TranslationConfig.from_project(
+                project,
+                model_override=model_name,
+                custom_instruction_override=custom_instructions,
+            )
+            PromptBuilder.validate_custom_instructions(config.custom_instructions)
+            locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
+            signature = build_translation_signature_from_config(config, locked_glossary)
+            engine = ContextualTranslationEngine(
+                db, project, provider, config, locked_glossary, self.broadcast_event,
+            )
             project.current_stage = "TRANSLATING"
             db.commit()
-
-            mode = TranslationMode(project.translation_mode) if project.translation_mode else TranslationMode.NATURAL
-            doc_type = project.document_type or "GENERAL"
-            style_guide = project.style_guide or {}
-            locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
-            signature = build_translation_signature(
-                source_language=project.source_language or "en",
-                target_language=project.target_language or "vi",
-                translation_mode=mode.value,
-                document_type=doc_type,
-                style_guide=style_guide,
-                locked_glossary=locked_glossary,
-                custom_instructions=custom_instructions or project.custom_instructions or "",
-            )
-
-            sys_prompt = PromptBuilder.build_system_prompt(
-                document_type=doc_type,
-                translation_mode=mode,
-                style_guide=style_guide,
-                custom_instructions=custom_instructions or project.custom_instructions
-            )
-
-            chapters = db.query(ChapterModel).filter(ChapterModel.project_id == project_id).order_by(ChapterModel.order_index).all()
-            all_project_nodes = db.query(NodeModel).filter(NodeModel.project_id == project_id).order_by(NodeModel.order_index).all()
-            cache_dir = settings.PROJECTS_DIR / project_id / "cache"
-            document_profile = DocumentProfiler.load_or_create(
-                all_project_nodes,
-                cache_dir,
-                doc_type,
-                custom_instructions or project.custom_instructions or "",
-                provider,
-                model_name,
-            )
-            capabilities = provider.get_model_capabilities(model_name)
-            total_nodes = db.query(NodeModel).filter(NodeModel.project_id == project_id).count()
+            chapters = db.query(ChapterModel).filter(
+                ChapterModel.project_id == project_id
+            ).order_by(ChapterModel.order_index).all()
+            translatable_types = tuple(translatable_values())
 
             for chapter in chapters:
-                if not stop_event.is_set():
-                    break
-
-                # Dùng toàn chương cho memory, không chỉ các node đang chờ dịch.
-                chapter_nodes = db.query(NodeModel).filter(
-                    NodeModel.chapter_id == chapter.id
-                ).order_by(NodeModel.order_index).all()
-
-                nodes_to_translate = db.query(NodeModel).filter(
-                    NodeModel.chapter_id == chapter.id,
-                    NodeModel.status.in_(["PENDING", "FAILED"])
-                ).order_by(NodeModel.order_index).all()
-
-                if not nodes_to_translate:
-                    continue
-
-                chapter_memory = ChapterMemoryBuilder.load_or_create(
-                    chapter.id,
-                    chapter.title,
-                    chapter_nodes,
-                    cache_dir,
-                    locked_glossary,
-                    provider,
-                    model_name,
-                )
-                if chapter.summary != chapter_memory.summary:
-                    chapter.summary = chapter_memory.summary
-                    db.commit()
-
-                # Chunk nodes
-                canonical_nodes = [
-                    DocumentNode(
-                        id=n.id,
-                        type=NodeType(n.node_type.lower()) if n.node_type else NodeType.PARAGRAPH,
-                        content=n.content,
-                        status=NodeStatus(n.status),
-                        order_index=n.order_index,
-                    ) for n in nodes_to_translate
-                ]
-
-                seed_context = ContextAssembler.assemble_context(
-                    canonical_nodes[:1], document_profile, chapter_memory, [],
-                    locked_glossary, capabilities, [],
-                )
-                chunks = SemanticChunker.chunk_nodes(
-                    canonical_nodes,
-                    source_budget=seed_context.token_budget.source_budget,
-                    hard_limit=seed_context.token_budget.source_budget,
-                )
-
-                for chunk in chunks:
+                while stop_event.is_set():
+                    while pause_event.is_set() and stop_event.is_set():
+                        time.sleep(0.25)
                     if not stop_event.is_set():
                         break
+                    pending_models = db.query(NodeModel).filter(
+                        NodeModel.chapter_id == chapter.id,
+                        NodeModel.node_type.in_(translatable_types),
+                        NodeModel.status.in_(["PENDING", "FAILED"]),
+                    ).order_by(NodeModel.order_index).all()
+                    if not pending_models:
+                        break
 
-                    # Check pause
-                    while pause_event.is_set() and stop_event.is_set():
-                        time.sleep(0.5)
-
-                    chunk_to_call = []
-                    # Check translation memory first (PRD Section 69)
-                    for node in chunk.nodes:
-                        tm_hit = TranslationMemoryService.lookup(
-                            db,
-                            node.content,
-                            style_hash=signature.style_hash,
-                            glossary_hash=signature.glossary_hash,
+                    first_model = pending_models[0]
+                    tm_hit = TranslationMemoryService.lookup(
+                        db,
+                        first_model.content,
+                        style_hash=signature.style_hash,
+                        glossary_hash=signature.glossary_hash,
+                        prompt_version=signature.prompt_version,
+                    )
+                    if tm_hit:
+                        trans_repo.save_node_translation(
+                            node_id=first_model.id,
+                            project_id=project_id,
+                            translated_text=tm_hit,
+                            model_name=f"TM ({config.model_name})",
                             prompt_version=signature.prompt_version,
                         )
-                        if tm_hit:
+                        continue
+
+                    canonical_nodes = [engine.canonical_node(node) for node in pending_models]
+                    chunk = engine.pack_next_chunk(chapter, canonical_nodes)
+                    if not chunk:
+                        break
+                    self.broadcast_event("TRANSLATION_CHUNK_STARTED", {
+                        "project_id": project_id,
+                        "chapter_title": chapter.title,
+                        "chunk_id": chunk.chunk_id,
+                        "node_ids": [node.id for node in chunk.nodes],
+                    })
+                    for node in chunk.nodes:
+                        db_node = db.query(NodeModel).filter(NodeModel.id == node.id).first()
+                        if db_node:
+                            db_node.status = "TRANSLATING"
+                    db.commit()
+
+                    batch_result = engine.translate_batch(chapter, chunk.nodes)
+                    for result in batch_result.results:
+                        source_node = next(node for node in chunk.nodes if node.id == result.node_id)
+                        if result.passed:
                             trans_repo.save_node_translation(
-                                node_id=node.id,
+                                node_id=result.node_id,
                                 project_id=project_id,
-                                translated_text=tm_hit,
-                                model_name=f"TM ({model_name})",
+                                translated_text=result.translated_text,
+                                model_name=config.model_name,
+                                prompt_version=signature.prompt_version,
+                                latency_ms=result.telemetry.latency_ms,
+                            )
+                            TranslationMemoryService.store(
+                                db=db,
+                                source_text=source_node.content,
+                                translated_text=result.translated_text,
+                                style_hash=signature.style_hash,
+                                glossary_hash=signature.glossary_hash,
+                                model_name=config.model_name,
                                 prompt_version=signature.prompt_version,
                             )
                         else:
-                            chunk_to_call.append(node)
-                            # Mark node as TRANSLATING in SQLite immediately
-                            db_node = db.query(NodeModel).filter(NodeModel.id == node.id).first()
+                            db_node = db.query(NodeModel).filter(NodeModel.id == result.node_id).first()
                             if db_node:
-                                db_node.status = "TRANSLATING"
-                    db.commit()
-
-                    if chunk_to_call:
-                        first_order = min(node.order_index for node in chunk_to_call)
-                        rolling_context = RollingContextService.get_previous(
-                            db, chapter.id, first_order, max_nodes=4, max_tokens=700,
-                        )
-                        few_shots = select_few_shots(
-                            doc_type,
-                            mode.value,
-                            chunk_to_call[0].type.value,
-                            limit=1,
-                        )
-                        context = ContextAssembler.assemble_context(
-                            chunk_to_call,
-                            document_profile,
-                            chapter_memory,
-                            rolling_context,
-                            locked_glossary,
-                            capabilities,
-                            few_shots,
-                        )
-                        user_prompt = PromptBuilder.build_user_prompt(
-                            nodes=chunk_to_call,
-                            chapter_title=chapter.title,
-                            translation_context=context,
-                            document_type=doc_type,
-                            translation_mode=mode,
-                        )
-
-                        if os.getenv("TRANSLATION_DEBUG", "").lower() in {"1", "true", "yes"}:
-                            print("[TranslationContext] " + json.dumps({
-                                "project": project_id,
-                                "chapter": chapter.id,
-                                "chunk": chunk.chunk_id,
-                                "source_tokens": chunk.estimated_tokens,
-                                "context_tokens": context.token_budget.context_tokens,
-                                "source_budget": context.token_budget.source_budget,
-                                "prompt_version": signature.prompt_version,
-                                "model": model_name,
-                            }, ensure_ascii=False))
-
-                        expected_ids = [node.id for node in chunk_to_call]
-                        oversized = {
-                            node_id: segments for node_id, segments in chunk.oversized_segments.items()
-                            if node_id in expected_ids
-                        }
-                        if oversized:
-                            translated_parts = []
-                            oversized_error = ""
-                            try:
-                                only_node = chunk_to_call[0]
-                                for part in oversized[only_node.id]:
-                                    segment_reference = user_prompt.replace(
-                                        only_node.content,
-                                        "[CURRENT SEGMENT IS PROVIDED IN THE USER MESSAGE]",
-                                    )
-                                    translated_parts.append(provider.translate_single(
-                                        text=part,
-                                        system_prompt=f"{sys_prompt}\n\n{segment_reference}",
-                                        glossary_terms=context.glossary,
-                                        model=model_name,
-                                        temperature=0.15,
-                                    ))
-                                parsed = validate_translation_batch(
-                                    [{"node_id": only_node.id, "text": " ".join(translated_parts)}],
-                                    expected_ids,
-                                )
-                            except Exception as exc:
-                                oversized_error = str(exc)
-                                parsed = validate_translation_batch([], expected_ids, oversized_error)
-                        else:
-                            try:
-                                translations = provider.translate(
-                                    blocks=[{"id": node.id, "text": node.content} for node in chunk_to_call],
-                                    system_prompt=sys_prompt,
-                                    user_prompt=user_prompt,
-                                    model=model_name,
-                                )
-                                parsed = validate_translation_batch(translations, expected_ids)
-                            except Exception as exc:
-                                parsed = validate_translation_batch([], expected_ids, str(exc))
-
-                        severe_mapping_error = bool(parsed.duplicate_ids or parsed.unknown_ids or parsed.raw_error)
-                        trans_map = {} if severe_mapping_error else {
-                            item["node_id"]: item["text"] for item in parsed.translations
-                        }
-
-                        if severe_mapping_error:
-                            self.broadcast_event("TRANSLATION_VALIDATION_FAILED", {
+                                db_node.status = "NEEDS_REVIEW"
+                                db.commit()
+                            self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
                                 "project_id": project_id,
-                                "node_id": None,
-                                "attempt": 1,
-                                "issues": ["NODE_MAPPING_ERROR"],
+                                "node_id": result.node_id,
+                                "attempt": result.attempts,
+                                "issues": [issue["code"] for issue in result.quality.issues],
                             })
-
-                        for node in chunk_to_call:
-                            candidate = trans_map.get(node.id, "")
-                            saved = False
-                            issues: List[Dict[str, str]]
-                            if candidate:
-                                saved, _, gate = self._store_valid_candidate(
-                                    db, trans_repo, project_id, node, candidate, model_name,
-                                    locked_glossary, signature,
-                                )
-                                issues = gate.issues
-                            else:
-                                code = "NODE_MAPPING_ERROR" if severe_mapping_error else "MISSING_NODE_IDS"
-                                issues = [{
-                                    "code": code,
-                                    "severity": "ERROR",
-                                    "message": f"Provider không trả bản dịch hợp lệ cho node {node.id}.",
-                                }]
-                            if not saved:
-                                self._retry_invalid_node(
-                                    db, trans_repo, provider, project_id, node, model_name,
-                                    f"{sys_prompt}\n\n{user_prompt}", locked_glossary, signature, issues, stop_event,
-                                )
-
-                    # Broadcast progress
+                    telemetry = batch_result.telemetry
+                    if os.getenv("TRANSLATION_DEBUG", "").lower() in {"1", "true", "yes"}:
+                        print("[TranslationContext] " + json.dumps(telemetry.__dict__, ensure_ascii=False))
                     stats = proj_repo.get_project_stats(project_id)
+                    self.broadcast_event("TRANSLATION_CHUNK_COMPLETED", {
+                        "project_id": project_id,
+                        "chapter_title": chapter.title,
+                        "chunk_id": chunk.chunk_id,
+                        "context_mode": "CONTEXTUAL_STABLE",
+                        "prompt_version": signature.prompt_version,
+                        "context_limit": telemetry.context_limit,
+                        "source_tokens": telemetry.source_tokens,
+                        "total_tokens": telemetry.total_tokens,
+                        **stats,
+                    })
                     self.broadcast_event("TRANSLATION_PROGRESS", {
                         "project_id": project_id,
                         "chapter_title": chapter.title,
                         "chunk_id": chunk.chunk_id,
-                        "context_mode": "CONTEXTUAL_BALANCED",
-                        "prompt_version": signature.prompt_version,
-                        **stats
+                        "context_mode": "CONTEXTUAL_STABLE",
+                        **stats,
                     })
 
-            # Vá các node cũ chưa hoàn tất nhưng vẫn bắt buộc đi qua Quality Gate.
-            if stop_event.is_set():
-                stale_nodes = db.query(NodeModel).filter(
-                    NodeModel.project_id == project_id,
-                    NodeModel.status.in_(["FAILED", "PENDING"]),
-                ).order_by(NodeModel.order_index).all()
-                for stale in stale_nodes:
-                    canonical = DocumentNode(
-                        id=stale.id,
-                        type=NodeType(stale.node_type.lower()) if stale.node_type else NodeType.PARAGRAPH,
-                        content=stale.content,
-                        status=NodeStatus.FAILED,
-                        order_index=stale.order_index,
-                    )
-                    stale_chapter = db.query(ChapterModel).filter(ChapterModel.id == stale.chapter_id).first()
-                    stale_chapter_nodes = db.query(NodeModel).filter(
-                        NodeModel.chapter_id == stale.chapter_id
-                    ).order_by(NodeModel.order_index).all()
-                    stale_memory = ChapterMemoryBuilder.load_or_create(
-                        stale.chapter_id or "root",
-                        stale_chapter.title if stale_chapter else "Tài liệu",
-                        stale_chapter_nodes,
-                        cache_dir,
-                        locked_glossary,
-                        provider,
-                        model_name,
-                    )
-                    stale_context = ContextAssembler.assemble_context(
-                        [canonical], document_profile, stale_memory,
-                        RollingContextService.get_neighbors(db, stale),
-                        locked_glossary, capabilities,
-                        select_few_shots(doc_type, mode.value, canonical.type.value),
-                    )
-                    stale_prompt = PromptBuilder.build_user_prompt(
-                        [canonical], stale_chapter.title if stale_chapter else "",
-                        translation_context=stale_context,
-                        document_type=doc_type,
-                        translation_mode=mode,
-                    )
-                    self._retry_invalid_node(
-                        db, trans_repo, provider, project_id, canonical, model_name,
-                        f"{sys_prompt}\n\n{stale_prompt}", locked_glossary, signature,
-                        [{
-                            "code": "TRANSLATION_PROVIDER_ERROR",
-                            "severity": "ERROR",
-                            "message": "Node chưa có bản dịch hợp lệ sau batch.",
-                        }],
-                        stop_event,
-                    )
-
-
-
-            # Check if all completed
             stats = proj_repo.get_project_stats(project_id)
-            if stats["translated_nodes"] >= total_nodes and total_nodes > 0:
+            if not stop_event.is_set():
+                project.current_stage = "TRANSLATION_CONFIGURED"
+            elif stats["translatable_nodes"] == 0 or stats["translated_nodes"] == stats["translatable_nodes"]:
                 project.current_stage = "TRANSLATED"
+            elif stats["terminal_nodes"] >= stats["translatable_nodes"]:
+                project.current_stage = "TRANSLATED_WITH_REVIEW"
+            elif systemic_failure:
+                project.current_stage = "TRANSLATION_FAILED"
+            else:
+                project.current_stage = "TRANSLATION_FAILED"
+            db.commit()
+            self.broadcast_event("TRANSLATION_JOB_FINALIZED", {
+                "project_id": project_id,
+                "document_status": project.current_stage,
+                "execution_status": "IDLE",
+                **stats,
+            })
+        except Exception as exc:
+            systemic_failure = True
+            if project:
+                project.current_stage = "TRANSLATION_FAILED"
                 db.commit()
-                self.broadcast_event("TRANSLATION_COMPLETED", {
-                    "project_id": project_id,
-                    "total_nodes": total_nodes,
-                    "translated_nodes": stats["translated_nodes"]
-                })
-
+            self.broadcast_event("TRANSLATION_ERROR", {
+                "project_id": project_id,
+                "error_type": "TRANSLATION_JOB_ERROR",
+                "message": str(exc),
+            })
         finally:
+            if project and project.current_stage == "TRANSLATING":
+                project.current_stage = "TRANSLATION_FAILED" if systemic_failure else "TRANSLATION_CONFIGURED"
+                db.commit()
+            self.telemetry.setdefault(project_id, {})["execution_status"] = (
+                "IDLE" if stop_event.is_set() else "STOPPED"
+            )
             db.close()
-            if project_id in self.running_tasks:
-                del self.running_tasks[project_id]
-            if project_id in self.pause_tasks:
-                del self.pause_tasks[project_id]
+            self.running_tasks.pop(project_id, None)
+            self.pause_tasks.pop(project_id, None)
+            self.active_threads.pop(project_id, None)
 
 
 translation_worker = TranslationWorker()

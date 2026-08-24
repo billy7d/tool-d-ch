@@ -1,0 +1,41 @@
+[
+  {
+    "book_id": "business-expansion",
+    "domain": "BUSINESS",
+    "chapter_title": "Mở rộng hoạt động",
+    "node_count": 30,
+    "entities": ["Northstar Labs", "Mai Tran"],
+    "locked_glossary": {"operating margin": "biên lợi nhuận hoạt động", "cash flow": "dòng tiền"},
+    "source_templates": [
+      "Northstar Labs reviewed its operating margin in quarter {n}.",
+      "Mai Tran said the company would not sacrifice cash flow for growth.",
+      "The board approved an investment of $1,000 in phase {n}."
+    ]
+  },
+  {
+    "book_id": "technical-runtime",
+    "domain": "TECHNICAL",
+    "chapter_title": "Vận hành hệ thống",
+    "node_count": 30,
+    "entities": ["Orion API", "NodeManager"],
+    "locked_glossary": {"runtime": "môi trường chạy", "request": "yêu cầu"},
+    "source_templates": [
+      "The Orion API handled {n} requests without restarting the runtime.",
+      "NodeManager must not discard a failed request.",
+      "Memory usage remained below 2.5 GB during test {n}."
+    ]
+  },
+  {
+    "book_id": "finance-risk",
+    "domain": "FINANCE",
+    "chapter_title": "Quản trị rủi ro",
+    "node_count": 30,
+    "entities": ["Atlas Fund", "Lan Nguyen"],
+    "locked_glossary": {"risk premium": "phần bù rủi ro", "yield": "lợi suất"},
+    "source_templates": [
+      "Atlas Fund measured a risk premium of 1.20% in period {n}.",
+      "Lan Nguyen warned that the yield could fall to -10%.",
+      "The portfolio did not exceed the 20% limit in period {n}."
+    ]
+  }
+]
