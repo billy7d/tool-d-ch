@@ -14,6 +14,8 @@ from app.services.translation.vietnamese_post_processor import VietnamesePostPro
 from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.translation_memory import TranslationMemoryService
+from app.services.translation.quality_gate import TranslationQualityGate
+from app.services.translation.translation_signature import build_translation_signature
 
 router = APIRouter(prefix="/api/projects/{project_id}/qa", tags=["QA"])
 
@@ -224,7 +226,16 @@ def retranslate_all_qa_issues(
             custom_instructions=instruction
         )
 
+        signature = build_translation_signature(
+            source_language=proj.source_language or "en",
+            target_language=proj.target_language or "vi",
+            translation_mode=tr_mode.value,
+            document_type=doc_type,
+            style_guide=proj.style_guide or {},
+            locked_glossary=locked_glossary,
+        )
         trans_repo = TranslationRepository(db)
+        quality_gate = TranslationQualityGate()
         fixed_count = 0
         total_nodes = len(node_ids)
 
@@ -242,12 +253,14 @@ def retranslate_all_qa_issues(
                     temperature=0.15
                 )
                 if tr_single:
-                    tr_single = VietnamesePostProcessor.clean_vietnamese_text(tr_single)
-                    tr_single = VietnamesePostProcessor.enforce_locked_glossary(tr_single, node.content, locked_glossary)
-                    if VietnamesePostProcessor.contains_chinese(tr_single):
-                        tr_single = VietnamesePostProcessor.strip_chinese_characters(tr_single)
-                        tr_single = VietnamesePostProcessor.clean_vietnamese_text(tr_single)
-
+                    tr_single = VietnamesePostProcessor.normalize_safely(tr_single)
+                    gate = quality_gate.validate(node.content, tr_single, locked_glossary)
+                    probe = NodeModel(content=node.content, translated_content=tr_single)
+                    deterministic_issues = DeterministicQA.audit_node(probe)
+                    if not gate.passed or deterministic_issues:
+                        node.status = "NEEDS_REVIEW"
+                        db.commit()
+                        continue
                     trans_repo.save_node_translation(
                         node_id=nid,
                         project_id=project_id,
@@ -260,9 +273,15 @@ def retranslate_all_qa_issues(
                         db=db,
                         source_text=node.content,
                         translated_text=tr_single,
-                        model_name=model_name
+                        style_hash=signature.style_hash,
+                        glossary_hash=signature.glossary_hash,
+                        model_name=model_name,
+                        prompt_version=signature.prompt_version,
                     )
                     fixed_count += 1
+                    for issue in issues:
+                        if issue.node_id == nid:
+                            issue.status = "RESOLVED"
             except Exception as e_node:
                 print(f"[QA Bulk Fix] Error fixing node {nid}: {e_node}")
 
@@ -276,9 +295,6 @@ def retranslate_all_qa_issues(
                 "current_node_id": nid
             })
 
-        # Clear resolved issues
-        for iss in issues:
-            iss.status = "RESOLVED"
         db.commit()
 
         return {

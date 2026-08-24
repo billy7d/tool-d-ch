@@ -6,6 +6,7 @@ import {
   QAIssue,
   LayoutProfile,
   HardwareInfo,
+  TranslationPreviewResponse,
 } from '../types';
 
 const api = axios.create({
@@ -58,6 +59,8 @@ export const apiClient = {
     api.get(`/projects/${projectId}/translation/status`).then((r) => r.data),
   retranslateNode: (projectId: string, nodeId: string, instruction: string, customModel?: string) =>
     api.post(`/projects/${projectId}/translation/nodes/${nodeId}/retranslate`, { instruction, custom_model: customModel }).then((r) => r.data),
+  previewTranslation: (projectId: string, data: Record<string, any>) =>
+    api.post<TranslationPreviewResponse>(`/projects/${projectId}/translation/preview`, data).then((r) => r.data),
 
   // Glossary
   getGlossary: (projectId: string) =>

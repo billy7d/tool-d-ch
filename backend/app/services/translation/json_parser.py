@@ -1,6 +1,18 @@
 import re
 import json
+from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+
+
+@dataclass(frozen=True)
+class TranslationParseResult:
+    valid: bool
+    translations: List[Dict[str, str]] = field(default_factory=list)
+    missing_ids: List[str] = field(default_factory=list)
+    duplicate_ids: List[str] = field(default_factory=list)
+    unknown_ids: List[str] = field(default_factory=list)
+    empty_ids: List[str] = field(default_factory=list)
+    raw_error: Optional[str] = None
 
 
 def extract_single_translation_text(raw_text: str) -> str:
@@ -56,7 +68,11 @@ def extract_single_translation_text(raw_text: str) -> str:
     return cleaned.strip()
 
 
-def clean_and_parse_llm_json(content: str, expected_node_ids: Optional[List[str]] = None) -> List[Dict[str, str]]:
+def clean_and_parse_llm_json(
+    content: str,
+    expected_node_ids: Optional[List[str]] = None,
+    strict: bool = False,
+) -> List[Dict[str, str]]:
     """
     Robustly parses LLM responses for translation batches.
     Handles:
@@ -126,12 +142,12 @@ def clean_and_parse_llm_json(content: str, expected_node_ids: Optional[List[str]
                 if isinstance(item, dict):
                     nid = item.get("node_id") or item.get("id")
                     txt = item.get("text") or item.get("translation") or item.get("translated_text") or item.get("vietnamese") or ""
-                    # Fallback to expected_node_ids by position if nid is missing or numeric
-                    if (not nid or str(nid).isdigit()) and expected_node_ids and idx < len(expected_node_ids):
+                    # Chỉ chế độ tương thích cũ mới được phép ánh xạ theo vị trí.
+                    if not strict and (not nid or str(nid).isdigit()) and expected_node_ids and idx < len(expected_node_ids):
                         nid = expected_node_ids[idx]
-                    if nid and txt:
+                    if nid:
                         results.append({"node_id": str(nid), "text": str(txt).strip()})
-                elif isinstance(item, str) and expected_node_ids and idx < len(expected_node_ids):
+                elif not strict and isinstance(item, str) and expected_node_ids and idx < len(expected_node_ids):
                     results.append({"node_id": expected_node_ids[idx], "text": item.strip()})
 
             if results:
@@ -158,3 +174,55 @@ def clean_and_parse_llm_json(content: str, expected_node_ids: Optional[List[str]
             return results
 
     return results
+
+
+def validate_translation_batch(
+    translations: List[Dict[str, str]],
+    expected_node_ids: List[str],
+    raw_error: Optional[str] = None,
+) -> TranslationParseResult:
+    """Đối chiếu ID tuyệt đối; không đoán node từ thứ tự đầu ra."""
+    expected = list(dict.fromkeys(str(node_id) for node_id in expected_node_ids))
+    expected_set = set(expected)
+    seen: Dict[str, int] = {}
+    normalized: List[Dict[str, str]] = []
+    empty_ids: List[str] = []
+
+    for item in translations or []:
+        if not isinstance(item, dict):
+            continue
+        node_id = item.get("node_id") or item.get("id")
+        if node_id is None:
+            continue
+        node_id = str(node_id)
+        text = item.get("text")
+        if text is None:
+            text = item.get("translation") or item.get("translated_text") or ""
+        text = str(text).strip()
+        seen[node_id] = seen.get(node_id, 0) + 1
+        normalized.append({"node_id": node_id, "text": text})
+        if not text:
+            empty_ids.append(node_id)
+
+    duplicate_ids = sorted(node_id for node_id, count in seen.items() if count > 1)
+    unknown_ids = sorted(node_id for node_id in seen if node_id not in expected_set)
+    missing_ids = [node_id for node_id in expected if node_id not in seen]
+    valid = not (missing_ids or duplicate_ids or unknown_ids or empty_ids or raw_error)
+    return TranslationParseResult(
+        valid=valid,
+        translations=normalized,
+        missing_ids=missing_ids,
+        duplicate_ids=duplicate_ids,
+        unknown_ids=unknown_ids,
+        empty_ids=sorted(set(empty_ids)),
+        raw_error=raw_error,
+    )
+
+
+def parse_translation_batch_strict(content: str, expected_node_ids: List[str]) -> TranslationParseResult:
+    """Phân tích batch production và trả kết quả lỗi có cấu trúc."""
+    if not content or not content.strip():
+        return validate_translation_batch([], expected_node_ids, "MALFORMED_PROVIDER_RESPONSE")
+    translations = clean_and_parse_llm_json(content, expected_node_ids, strict=True)
+    error = None if translations else "MALFORMED_PROVIDER_RESPONSE"
+    return validate_translation_batch(translations, expected_node_ids, error)

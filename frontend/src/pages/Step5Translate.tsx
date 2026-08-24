@@ -30,6 +30,10 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
     needs_review_nodes: 0,
     progress_percent: project.progress_percent || 0,
     current_chapter_title: '',
+    current_chunk_id: '',
+    context_mode: 'CONTEXTUAL_BALANCED',
+    retry_count: 0,
+    quality_state: 'READY',
   });
   const [ollamaOnline, setOllamaOnline] = useState<boolean>(true);
   const prevOllamaRef = useRef<boolean>(true);
@@ -46,6 +50,10 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
         needs_review_nodes: res.needs_review_nodes,
         progress_percent: res.progress_percent,
         current_chapter_title: res.current_chapter_title || prev.current_chapter_title,
+        current_chunk_id: res.current_chunk_id || prev.current_chunk_id,
+        context_mode: res.context_mode || prev.context_mode,
+        retry_count: res.retry_count ?? prev.retry_count,
+        quality_state: res.quality_state || prev.quality_state,
       }));
 
       const hw = await apiClient.getHardwareInfo();
@@ -156,6 +164,13 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
             <span className="text-2xl font-black text-sky-400">{stats.progress_percent}%</span>
             <span className="text-xs text-slate-500 block">Đã hoàn thành</span>
           </div>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+          <div className="bg-sky-500/10 border border-sky-500/20 rounded-xl p-3"><span className="text-slate-500 block">Chương hiện tại</span><span className="text-sky-300 block mt-1 truncate">{stats.current_chapter_title || 'Đang chuẩn bị'}</span></div>
+          <div className="bg-sky-500/10 border border-sky-500/20 rounded-xl p-3"><span className="text-slate-500 block">Chunk</span><span className="text-sky-300 block mt-1">{stats.current_chunk_id || '—'}</span></div>
+          <div className="bg-sky-500/10 border border-sky-500/20 rounded-xl p-3"><span className="text-slate-500 block">Context engine</span><span className="text-sky-300 block mt-1">{stats.context_mode}</span></div>
+          <div className="bg-sky-500/10 border border-sky-500/20 rounded-xl p-3"><span className="text-slate-500 block">Quality / Retry</span><span className="text-sky-300 block mt-1">{stats.quality_state} · {stats.retry_count}</span></div>
         </div>
 
         {/* Large Progress bar */}
@@ -323,4 +338,3 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
     </div>
   );
 };
-

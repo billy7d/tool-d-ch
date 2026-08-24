@@ -1,6 +1,8 @@
 import time
 import asyncio
 import threading
+import json
+import os
 from typing import Dict, Any, Optional, Callable, List
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
@@ -17,6 +19,17 @@ from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.translation_memory import TranslationMemoryService
 from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
+from app.services.translation.json_parser import validate_translation_batch
+from app.services.translation.quality_gate import TranslationQualityGate
+from app.services.translation.translation_signature import build_translation_signature
+from app.services.translation.document_profiler import DocumentProfiler
+from app.services.translation.context_memory import ChapterMemoryBuilder, RollingContextService
+from app.services.translation.context_assembler import ContextAssembler
+from app.services.translation.prompt_profiles import select_few_shots
+from app.config import settings
+
+
+MAX_TRANSLATION_REPAIR_ATTEMPTS = 2
 
 
 
@@ -28,12 +41,27 @@ class TranslationWorker:
         self.pause_tasks: Dict[str, threading.Event] = {}    # project_id -> pause_event
         self.active_threads: Dict[str, threading.Thread] = {}
         self.subscribers: List[Callable[[Dict[str, Any]], None]] = []
+        self.telemetry: Dict[str, Dict[str, Any]] = {}
 
     def register_event_listener(self, callback: Callable[[Dict[str, Any]], None]):
         self.subscribers.append(callback)
 
     def broadcast_event(self, event_type: str, data: Dict[str, Any]):
         payload = {"type": event_type, "data": data, "timestamp": time.time()}
+        project_id = data.get("project_id")
+        if project_id:
+            current = self.telemetry.setdefault(project_id, {})
+            if event_type == "TRANSLATION_PROGRESS":
+                current.update({
+                    "current_chapter_title": data.get("chapter_title"),
+                    "current_chunk_id": data.get("chunk_id"),
+                    "context_mode": data.get("context_mode"),
+                    "quality_state": "PASSING_GATE",
+                })
+            elif event_type == "TRANSLATION_RETRYING":
+                current.update({"retry_count": data.get("attempt", 0), "quality_state": "RETRYING"})
+            elif event_type == "TRANSLATION_NODE_NEEDS_REVIEW":
+                current.update({"quality_state": "NEEDS_REVIEW"})
         for sub in self.subscribers:
             try:
                 sub(payload)
@@ -135,7 +163,7 @@ class TranslationWorker:
         try:
             failed_nodes = db.query(NodeModel).filter(
                 NodeModel.project_id == project_id,
-                NodeModel.status == "FAILED"
+                NodeModel.status.in_(["FAILED", "NEEDS_REVIEW"])
             ).all()
             for n in failed_nodes:
                 n.status = "PENDING"
@@ -164,6 +192,122 @@ class TranslationWorker:
                 })
                 return True
             wait_interval = min(10.0, wait_interval * 1.5)
+        return False
+
+    @staticmethod
+    def _validation_prompt(system_prompt: str, issues: List[Dict[str, str]], attempt: int) -> str:
+        details = "\n".join(f"- {issue['code']}: {issue['message']}" for issue in issues)
+        return (
+            f"{system_prompt}\n\n"
+            "Your previous translation did not pass validation.\n"
+            "Translate the ORIGINAL SOURCE again from beginning to end.\n\n"
+            f"Validation errors (attempt {attempt}):\n{details}\n\n"
+            "Requirements:\n"
+            "- Translate every proposition from the source.\n"
+            "- Do not summarize or omit sentences, clauses, numbers, dates or references.\n"
+            "- Vietnamese prose must be in Vietnamese.\n"
+            "- Proper nouns, trademarks, acronyms, URLs, code and identifiers may remain unchanged.\n"
+            "- Return only the translation."
+        )
+
+    def _store_valid_candidate(
+        self,
+        db: Session,
+        trans_repo: TranslationRepository,
+        project_id: str,
+        node: DocumentNode,
+        candidate: str,
+        model_name: str,
+        locked_glossary: Dict[str, str],
+        signature,
+        label: str = "",
+    ):
+        normalized = VietnamesePostProcessor.normalize_safely(candidate or "")
+        gate = TranslationQualityGate().validate(node.content, normalized, locked_glossary)
+        if not gate.passed:
+            return False, normalized, gate
+
+        trans_repo.save_node_translation(
+            node_id=node.id,
+            project_id=project_id,
+            translated_text=normalized,
+            model_name=f"{model_name}{label}",
+            prompt_version=signature.prompt_version,
+        )
+        TranslationMemoryService.store(
+            db=db,
+            source_text=node.content,
+            translated_text=normalized,
+            style_hash=signature.style_hash,
+            glossary_hash=signature.glossary_hash,
+            model_name=model_name,
+            prompt_version=signature.prompt_version,
+        )
+        return True, normalized, gate
+
+    def _retry_invalid_node(
+        self,
+        db: Session,
+        trans_repo: TranslationRepository,
+        provider: TranslationProvider,
+        project_id: str,
+        node: DocumentNode,
+        model_name: str,
+        system_prompt: str,
+        locked_glossary: Dict[str, str],
+        signature,
+        initial_issues: List[Dict[str, str]],
+        stop_event: threading.Event,
+    ) -> bool:
+        issues = initial_issues
+        for attempt in range(1, MAX_TRANSLATION_REPAIR_ATTEMPTS + 1):
+            if not stop_event.is_set():
+                return False
+            self.broadcast_event("TRANSLATION_RETRYING", {
+                "project_id": project_id,
+                "node_id": node.id,
+                "attempt": attempt,
+                "issues": [issue["code"] for issue in issues],
+            })
+            try:
+                started = time.time()
+                candidate = provider.translate_single(
+                    text=node.content,
+                    system_prompt=self._validation_prompt(system_prompt, issues, attempt),
+                    glossary_terms=locked_glossary,
+                    model=model_name,
+                    temperature=0.1 if attempt == 1 else 0.0,
+                )
+                saved, _, gate = self._store_valid_candidate(
+                    db, trans_repo, project_id, node, candidate, model_name,
+                    locked_glossary, signature, label=f" (Validation Retry {attempt})",
+                )
+                print(
+                    "[TranslationValidation] "
+                    f"project={project_id} node={node.id} model={model_name} attempt={attempt} "
+                    f"issues={[issue['code'] for issue in gate.issues]} "
+                    f"latency={time.time() - started:.3f} result={'PASS' if saved else 'FAIL'}"
+                )
+                if saved:
+                    return True
+                issues = gate.issues
+            except Exception as exc:
+                issues = [{
+                    "code": "TRANSLATION_PROVIDER_ERROR",
+                    "severity": "ERROR",
+                    "message": str(exc),
+                }]
+
+        db_node = db.query(NodeModel).filter(NodeModel.id == node.id).first()
+        if db_node:
+            db_node.status = "NEEDS_REVIEW"
+            db.commit()
+        self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
+            "project_id": project_id,
+            "node_id": node.id,
+            "attempt": MAX_TRANSLATION_REPAIR_ATTEMPTS,
+            "issues": [issue["code"] for issue in issues],
+        })
         return False
 
     def _run_translation_loop(
@@ -207,6 +351,15 @@ class TranslationWorker:
             doc_type = project.document_type or "GENERAL"
             style_guide = project.style_guide or {}
             locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
+            signature = build_translation_signature(
+                source_language=project.source_language or "en",
+                target_language=project.target_language or "vi",
+                translation_mode=mode.value,
+                document_type=doc_type,
+                style_guide=style_guide,
+                locked_glossary=locked_glossary,
+                custom_instructions=custom_instructions or project.custom_instructions or "",
+            )
 
             sys_prompt = PromptBuilder.build_system_prompt(
                 document_type=doc_type,
@@ -216,13 +369,28 @@ class TranslationWorker:
             )
 
             chapters = db.query(ChapterModel).filter(ChapterModel.project_id == project_id).order_by(ChapterModel.order_index).all()
+            all_project_nodes = db.query(NodeModel).filter(NodeModel.project_id == project_id).order_by(NodeModel.order_index).all()
+            cache_dir = settings.PROJECTS_DIR / project_id / "cache"
+            document_profile = DocumentProfiler.load_or_create(
+                all_project_nodes,
+                cache_dir,
+                doc_type,
+                custom_instructions or project.custom_instructions or "",
+                provider,
+                model_name,
+            )
+            capabilities = provider.get_model_capabilities(model_name)
             total_nodes = db.query(NodeModel).filter(NodeModel.project_id == project_id).count()
 
             for chapter in chapters:
                 if not stop_event.is_set():
                     break
 
-                # Get pending or failed nodes for this chapter
+                # Dùng toàn chương cho memory, không chỉ các node đang chờ dịch.
+                chapter_nodes = db.query(NodeModel).filter(
+                    NodeModel.chapter_id == chapter.id
+                ).order_by(NodeModel.order_index).all()
+
                 nodes_to_translate = db.query(NodeModel).filter(
                     NodeModel.chapter_id == chapter.id,
                     NodeModel.status.in_(["PENDING", "FAILED"])
@@ -231,14 +399,18 @@ class TranslationWorker:
                 if not nodes_to_translate:
                     continue
 
-                # Generate chapter memory summary if not present
-                if not chapter.summary and len(nodes_to_translate) > 0:
-                    try:
-                        sample_text = "\n".join([n.content for n in nodes_to_translate[:5]])
-                        chapter.summary = provider.summarize_context(sample_text, model=model_name)
-                        db.commit()
-                    except Exception:
-                        pass
+                chapter_memory = ChapterMemoryBuilder.load_or_create(
+                    chapter.id,
+                    chapter.title,
+                    chapter_nodes,
+                    cache_dir,
+                    locked_glossary,
+                    provider,
+                    model_name,
+                )
+                if chapter.summary != chapter_memory.summary:
+                    chapter.summary = chapter_memory.summary
+                    db.commit()
 
                 # Chunk nodes
                 canonical_nodes = [
@@ -246,13 +418,20 @@ class TranslationWorker:
                         id=n.id,
                         type=NodeType(n.node_type.lower()) if n.node_type else NodeType.PARAGRAPH,
                         content=n.content,
-                        status=NodeStatus(n.status)
+                        status=NodeStatus(n.status),
+                        order_index=n.order_index,
                     ) for n in nodes_to_translate
                 ]
 
-                chunks = SemanticChunker.chunk_nodes(canonical_nodes)
-
-                prev_context = ""
+                seed_context = ContextAssembler.assemble_context(
+                    canonical_nodes[:1], document_profile, chapter_memory, [],
+                    locked_glossary, capabilities, [],
+                )
+                chunks = SemanticChunker.chunk_nodes(
+                    canonical_nodes,
+                    source_budget=seed_context.token_budget.source_budget,
+                    hard_limit=seed_context.token_budget.source_budget,
+                )
 
                 for chunk in chunks:
                     if not stop_event.is_set():
@@ -265,13 +444,20 @@ class TranslationWorker:
                     chunk_to_call = []
                     # Check translation memory first (PRD Section 69)
                     for node in chunk.nodes:
-                        tm_hit = TranslationMemoryService.lookup(db, node.content)
+                        tm_hit = TranslationMemoryService.lookup(
+                            db,
+                            node.content,
+                            style_hash=signature.style_hash,
+                            glossary_hash=signature.glossary_hash,
+                            prompt_version=signature.prompt_version,
+                        )
                         if tm_hit:
                             trans_repo.save_node_translation(
                                 node_id=node.id,
                                 project_id=project_id,
                                 translated_text=tm_hit,
-                                model_name=f"TM ({model_name})"
+                                model_name=f"TM ({model_name})",
+                                prompt_version=signature.prompt_version,
                             )
                         else:
                             chunk_to_call.append(node)
@@ -282,254 +468,182 @@ class TranslationWorker:
                     db.commit()
 
                     if chunk_to_call:
+                        first_order = min(node.order_index for node in chunk_to_call)
+                        rolling_context = RollingContextService.get_previous(
+                            db, chapter.id, first_order, max_nodes=4, max_tokens=700,
+                        )
+                        few_shots = select_few_shots(
+                            doc_type,
+                            mode.value,
+                            chunk_to_call[0].type.value,
+                            limit=1,
+                        )
+                        context = ContextAssembler.assemble_context(
+                            chunk_to_call,
+                            document_profile,
+                            chapter_memory,
+                            rolling_context,
+                            locked_glossary,
+                            capabilities,
+                            few_shots,
+                        )
                         user_prompt = PromptBuilder.build_user_prompt(
                             nodes=chunk_to_call,
                             chapter_title=chapter.title,
-                            chapter_summary=chapter.summary,
-                            previous_context=prev_context,
-                            glossary_terms=locked_glossary
+                            translation_context=context,
+                            document_type=doc_type,
+                            translation_mode=mode,
                         )
 
-                        retries = 3
-                        success = False
-                        while retries > 0 and not success and stop_event.is_set():
+                        if os.getenv("TRANSLATION_DEBUG", "").lower() in {"1", "true", "yes"}:
+                            print("[TranslationContext] " + json.dumps({
+                                "project": project_id,
+                                "chapter": chapter.id,
+                                "chunk": chunk.chunk_id,
+                                "source_tokens": chunk.estimated_tokens,
+                                "context_tokens": context.token_budget.context_tokens,
+                                "source_budget": context.token_budget.source_budget,
+                                "prompt_version": signature.prompt_version,
+                                "model": model_name,
+                            }, ensure_ascii=False))
+
+                        expected_ids = [node.id for node in chunk_to_call]
+                        oversized = {
+                            node_id: segments for node_id, segments in chunk.oversized_segments.items()
+                            if node_id in expected_ids
+                        }
+                        if oversized:
+                            translated_parts = []
+                            oversized_error = ""
+                            try:
+                                only_node = chunk_to_call[0]
+                                for part in oversized[only_node.id]:
+                                    segment_reference = user_prompt.replace(
+                                        only_node.content,
+                                        "[CURRENT SEGMENT IS PROVIDED IN THE USER MESSAGE]",
+                                    )
+                                    translated_parts.append(provider.translate_single(
+                                        text=part,
+                                        system_prompt=f"{sys_prompt}\n\n{segment_reference}",
+                                        glossary_terms=context.glossary,
+                                        model=model_name,
+                                        temperature=0.15,
+                                    ))
+                                parsed = validate_translation_batch(
+                                    [{"node_id": only_node.id, "text": " ".join(translated_parts)}],
+                                    expected_ids,
+                                )
+                            except Exception as exc:
+                                oversized_error = str(exc)
+                                parsed = validate_translation_batch([], expected_ids, oversized_error)
+                        else:
                             try:
                                 translations = provider.translate(
-                                    blocks=[{"id": n.id, "text": n.content} for n in chunk_to_call],
+                                    blocks=[{"id": node.id, "text": node.content} for node in chunk_to_call],
                                     system_prompt=sys_prompt,
                                     user_prompt=user_prompt,
-                                    model=model_name
+                                    model=model_name,
                                 )
-                                
-                                # Map and commit each translation immediately (PRD Section 73 & 203)
-                                trans_map = {t.get("node_id") or t.get("id"): t.get("text", "") for t in translations if isinstance(t, dict)}
-                                
-                                for cn in chunk_to_call:
-                                    tr_text = trans_map.get(cn.id, "")
-                                    if tr_text:
-                                        tr_text = VietnamesePostProcessor.clean_vietnamese_text(tr_text)
-                                        tr_text = VietnamesePostProcessor.enforce_locked_glossary(tr_text, cn.content, locked_glossary)
-                                        
-                                        # Strict Chinese character check: Reject and auto-retry if Chinese detected
-                                        if VietnamesePostProcessor.contains_chinese(tr_text):
-                                            print(f"[Translation Worker] Chinese characters detected in node {cn.id}! Auto-retrying pure Vietnamese...")
-                                            try:
-                                                tr_clean = provider.translate_single(
-                                                    text=cn.content,
-                                                    system_prompt=sys_prompt,
-                                                    glossary_terms=locked_glossary,
-                                                    model=model_name,
-                                                    temperature=0.1
-                                                )
-                                                if tr_clean and not VietnamesePostProcessor.contains_chinese(tr_clean):
-                                                    tr_text = VietnamesePostProcessor.clean_vietnamese_text(tr_clean)
-                                                    tr_text = VietnamesePostProcessor.enforce_locked_glossary(tr_text, cn.content, locked_glossary)
-                                                else:
-                                                    tr_text = ""
-                                            except Exception:
-                                                tr_text = ""
+                                parsed = validate_translation_batch(translations, expected_ids)
+                            except Exception as exc:
+                                parsed = validate_translation_batch([], expected_ids, str(exc))
 
-                                    if tr_text and not VietnamesePostProcessor.contains_chinese(tr_text):
-                                        trans_repo.save_node_translation(
-                                            node_id=cn.id,
-                                            project_id=project_id,
-                                            translated_text=tr_text,
-                                            model_name=model_name
-                                        )
-                                        # Save to Translation Memory
-                                        TranslationMemoryService.store(
-                                            db=db,
-                                            source_text=cn.content,
-                                            translated_text=tr_text,
-                                            model_name=model_name
-                                        )
-                                    else:
-                                        # Single-node fallback with strict pure Vietnamese requirement
-                                        try:
-                                            tr_single = provider.translate_single(
-                                                text=cn.content,
-                                                system_prompt=sys_prompt,
-                                                glossary_terms=locked_glossary,
-                                                model=model_name,
-                                                temperature=0.1
-                                            )
-                                            if tr_single:
-                                                tr_single = VietnamesePostProcessor.clean_vietnamese_text(tr_single)
-                                                tr_single = VietnamesePostProcessor.enforce_locked_glossary(tr_single, cn.content, locked_glossary)
-                                                if not VietnamesePostProcessor.contains_chinese(tr_single):
-                                                    trans_repo.save_node_translation(
-                                                        node_id=cn.id,
-                                                        project_id=project_id,
-                                                        translated_text=tr_single,
-                                                        model_name=f"{model_name} (Single Fallback)"
-                                                    )
-                                                    TranslationMemoryService.store(
-                                                        db=db,
-                                                        source_text=cn.content,
-                                                        translated_text=tr_single,
-                                                        model_name=model_name
-                                                    )
-                                                else:
-                                                    db_n = db.query(NodeModel).filter(NodeModel.id == cn.id).first()
-                                                    if db_n:
-                                                        db_n.status = "FAILED"
-                                                        db.commit()
-                                            else:
-                                                db_n = db.query(NodeModel).filter(NodeModel.id == cn.id).first()
-                                                if db_n:
-                                                    db_n.status = "FAILED"
-                                                    db.commit()
-                                        except Exception:
-                                            db_n = db.query(NodeModel).filter(NodeModel.id == cn.id).first()
-                                            if db_n:
-                                                db_n.status = "FAILED"
-                                                db.commit()
+                        severe_mapping_error = bool(parsed.duplicate_ids or parsed.unknown_ids or parsed.raw_error)
+                        trans_map = {} if severe_mapping_error else {
+                            item["node_id"]: item["text"] for item in parsed.translations
+                        }
 
-                                success = True
-                            except Exception as e:
-                                # Check if Ollama went offline during translation
-                                if not provider.health_check():
-                                    print(f"[Translation Worker] Connection lost to provider, waiting for recovery...")
-                                    if not self._wait_for_ollama_recovery(provider, stop_event, project_id):
-                                        break
-                                
-                                retries -= 1
-                                if retries == 0:
-                                    print(f"[Translation Worker] Batch failed for chunk {chunk.chunk_id}: {e}. Trying single-node fallback for all chunk nodes...")
-                                    # Fallback: Translate each node in this chunk individually
-                                    for cn in chunk_to_call:
-                                        if not stop_event.is_set():
-                                            break
-                                        try:
-                                            tr_single = provider.translate_single(
-                                                text=cn.content,
-                                                system_prompt=sys_prompt,
-                                                glossary_terms=locked_glossary,
-                                                model=model_name,
-                                                temperature=0.1
-                                            )
-                                            if tr_single:
-                                                tr_single = VietnamesePostProcessor.clean_vietnamese_text(tr_single)
-                                                tr_single = VietnamesePostProcessor.enforce_locked_glossary(tr_single, cn.content, locked_glossary)
-                                                if not VietnamesePostProcessor.contains_chinese(tr_single):
-                                                    trans_repo.save_node_translation(
-                                                        node_id=cn.id,
-                                                        project_id=project_id,
-                                                        translated_text=tr_single,
-                                                        model_name=f"{model_name} (Single Fallback)"
-                                                    )
-                                                    TranslationMemoryService.store(
-                                                        db=db,
-                                                        source_text=cn.content,
-                                                        translated_text=tr_single,
-                                                        model_name=model_name
-                                                    )
-                                                else:
-                                                    db_n = db.query(NodeModel).filter(NodeModel.id == cn.id).first()
-                                                    if db_n:
-                                                        db_n.status = "FAILED"
-                                                        db.commit()
-                                            else:
-                                                db_n = db.query(NodeModel).filter(NodeModel.id == cn.id).first()
-                                                if db_n:
-                                                    db_n.status = "FAILED"
-                                                    db.commit()
-                                        except Exception as e_ind:
-                                            print(f"[Translation Worker] Single fallback failed for node {cn.id}: {e_ind}")
-                                            db_n = db.query(NodeModel).filter(NodeModel.id == cn.id).first()
-                                            if db_n:
-                                                db_n.status = "FAILED"
-                                                db.commit()
-                                else:
-                                    time.sleep(2.0)
+                        if severe_mapping_error:
+                            self.broadcast_event("TRANSLATION_VALIDATION_FAILED", {
+                                "project_id": project_id,
+                                "node_id": None,
+                                "attempt": 1,
+                                "issues": ["NODE_MAPPING_ERROR"],
+                            })
 
-                    # Update context
-                    prev_context = " ".join([n.content for n in chunk.nodes])[-300:]
+                        for node in chunk_to_call:
+                            candidate = trans_map.get(node.id, "")
+                            saved = False
+                            issues: List[Dict[str, str]]
+                            if candidate:
+                                saved, _, gate = self._store_valid_candidate(
+                                    db, trans_repo, project_id, node, candidate, model_name,
+                                    locked_glossary, signature,
+                                )
+                                issues = gate.issues
+                            else:
+                                code = "NODE_MAPPING_ERROR" if severe_mapping_error else "MISSING_NODE_IDS"
+                                issues = [{
+                                    "code": code,
+                                    "severity": "ERROR",
+                                    "message": f"Provider không trả bản dịch hợp lệ cho node {node.id}.",
+                                }]
+                            if not saved:
+                                self._retry_invalid_node(
+                                    db, trans_repo, provider, project_id, node, model_name,
+                                    f"{sys_prompt}\n\n{user_prompt}", locked_glossary, signature, issues, stop_event,
+                                )
 
                     # Broadcast progress
                     stats = proj_repo.get_project_stats(project_id)
                     self.broadcast_event("TRANSLATION_PROGRESS", {
                         "project_id": project_id,
                         "chapter_title": chapter.title,
+                        "chunk_id": chunk.chunk_id,
+                        "context_mode": "CONTEXTUAL_BALANCED",
+                        "prompt_version": signature.prompt_version,
                         **stats
                     })
 
-            # Auto-Healing Pass: Automatically repair any FAILED, PENDING, or Chinese-contaminated nodes
+            # Vá các node cũ chưa hoàn tất nhưng vẫn bắt buộc đi qua Quality Gate.
             if stop_event.is_set():
-                max_healing_passes = 2
-                for healing_pass in range(max_healing_passes):
-                    if not stop_event.is_set():
-                        break
-
-                    all_project_nodes = db.query(NodeModel).filter(
-                        NodeModel.project_id == project_id
+                stale_nodes = db.query(NodeModel).filter(
+                    NodeModel.project_id == project_id,
+                    NodeModel.status.in_(["FAILED", "PENDING"]),
+                ).order_by(NodeModel.order_index).all()
+                for stale in stale_nodes:
+                    canonical = DocumentNode(
+                        id=stale.id,
+                        type=NodeType(stale.node_type.lower()) if stale.node_type else NodeType.PARAGRAPH,
+                        content=stale.content,
+                        status=NodeStatus.FAILED,
+                        order_index=stale.order_index,
+                    )
+                    stale_chapter = db.query(ChapterModel).filter(ChapterModel.id == stale.chapter_id).first()
+                    stale_chapter_nodes = db.query(NodeModel).filter(
+                        NodeModel.chapter_id == stale.chapter_id
                     ).order_by(NodeModel.order_index).all()
-
-                    remaining_failed = []
-                    for n in all_project_nodes:
-                        if n.status in ["FAILED", "PENDING"]:
-                            remaining_failed.append(n)
-                        elif n.status == "TRANSLATED" and n.translated_content:
-                            if VietnamesePostProcessor.contains_chinese(n.translated_content):
-                                print(f"[Auto-Healing] Detected Chinese in translated node {n.id}, queuing for pure Vietnamese repair...")
-                                remaining_failed.append(n)
-
-                    if not remaining_failed:
-                        break
-
-                    print(f"[Translation Worker] Starting Auto-Healing Pass {healing_pass + 1} for {len(remaining_failed)} nodes...")
-                    self.broadcast_event("TRANSLATION_AUTO_HEALING", {
-                        "project_id": project_id,
-                        "healing_pass": healing_pass + 1,
-                        "remaining_nodes": len(remaining_failed),
-                        "message": f"Đang tự động dịch lại {len(remaining_failed)} đoạn văn bản (vá lỗi / sửa chữ Hán)..."
-                    })
-
-                    for fn in remaining_failed:
-                        if not stop_event.is_set():
-                            break
-                        while pause_event.is_set() and stop_event.is_set():
-                            time.sleep(0.5)
-
-                        # Check connection health
-                        if not provider.health_check():
-                            if not self._wait_for_ollama_recovery(provider, stop_event, project_id):
-                                break
-
-                        try:
-                            tr_single = provider.translate_single(
-                                text=fn.content,
-                                system_prompt=sys_prompt,
-                                glossary_terms=locked_glossary,
-                                model=model_name,
-                                temperature=0.1
-                            )
-                            if tr_single:
-                                tr_single = VietnamesePostProcessor.clean_vietnamese_text(tr_single)
-                                tr_single = VietnamesePostProcessor.enforce_locked_glossary(tr_single, fn.content, locked_glossary)
-                                if not VietnamesePostProcessor.contains_chinese(tr_single):
-                                    trans_repo.save_node_translation(
-                                        node_id=fn.id,
-                                        project_id=project_id,
-                                        translated_text=tr_single,
-                                        model_name=f"{model_name} (Auto-Healed)"
-                                    )
-                                    TranslationMemoryService.store(
-                                        db=db,
-                                        source_text=fn.content,
-                                        translated_text=tr_single,
-                                        model_name=model_name
-                                    )
-                                    # Broadcast progress after each healed node
-                                    stats = proj_repo.get_project_stats(project_id)
-                                    self.broadcast_event("TRANSLATION_PROGRESS", {
-                                        "project_id": project_id,
-                                        "chapter_title": "Tự động vá lỗi (Auto-Healing)",
-                                        **stats
-                                    })
-                        except Exception as e_heal:
-                            print(f"[Auto-Healing] Failed to heal node {fn.id}: {e_heal}")
-                            time.sleep(1.0)
+                    stale_memory = ChapterMemoryBuilder.load_or_create(
+                        stale.chapter_id or "root",
+                        stale_chapter.title if stale_chapter else "Tài liệu",
+                        stale_chapter_nodes,
+                        cache_dir,
+                        locked_glossary,
+                        provider,
+                        model_name,
+                    )
+                    stale_context = ContextAssembler.assemble_context(
+                        [canonical], document_profile, stale_memory,
+                        RollingContextService.get_neighbors(db, stale),
+                        locked_glossary, capabilities,
+                        select_few_shots(doc_type, mode.value, canonical.type.value),
+                    )
+                    stale_prompt = PromptBuilder.build_user_prompt(
+                        [canonical], stale_chapter.title if stale_chapter else "",
+                        translation_context=stale_context,
+                        document_type=doc_type,
+                        translation_mode=mode,
+                    )
+                    self._retry_invalid_node(
+                        db, trans_repo, provider, project_id, canonical, model_name,
+                        f"{sys_prompt}\n\n{stale_prompt}", locked_glossary, signature,
+                        [{
+                            "code": "TRANSLATION_PROVIDER_ERROR",
+                            "severity": "ERROR",
+                            "message": "Node chưa có bản dịch hợp lệ sau batch.",
+                        }],
+                        stop_event,
+                    )
 
 
 

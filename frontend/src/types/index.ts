@@ -150,6 +150,22 @@ export interface GlossaryItem {
   created_at: string;
 }
 
+export interface TranslationPreviewSample {
+  node_id: string;
+  source: string;
+  translation: string;
+  quality: {
+    passed: boolean;
+    issues: Array<{ code: string; severity: string; message: string }>;
+  };
+}
+
+export interface TranslationPreviewResponse {
+  samples: TranslationPreviewSample[];
+  profile: Record<string, any>;
+  prompt_version: string;
+}
+
 export interface QAIssue {
   id: string;
   node_id?: string;

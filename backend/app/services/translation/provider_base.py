@@ -1,8 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
+from app.services.translation.model_capabilities import ModelCapabilities, get_model_capabilities
 
 
 class TranslationProvider(ABC):
+    def get_model_capabilities(self, model_name: str) -> ModelCapabilities:
+        """Trả về ngân sách ngữ cảnh bảo thủ theo họ model."""
+        return get_model_capabilities(model_name)
+
     @abstractmethod
     def health_check(self) -> bool:
         """Returns True if the LLM provider backend is available and responsive."""
@@ -77,4 +82,3 @@ class TranslationProvider(ABC):
     ) -> Dict[str, Any]:
         """Performs AI QA review checking accuracy, terminology, and naturalness."""
         pass
-

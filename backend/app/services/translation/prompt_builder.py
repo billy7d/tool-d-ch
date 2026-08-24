@@ -1,70 +1,41 @@
-import re
 import json
-from typing import List, Dict, Any, Optional
-from app.models.canonical import TranslationMode, DocumentType, DocumentNode
+import re
+from typing import Any, Dict, List, Optional
+
+from app.models.canonical import DocumentNode, TranslationMode
+from app.services.translation.context_assembler import TranslationContext
+from app.services.translation.prompt_profiles import STYLE_PACK_VERSION, get_style_pack, select_few_shots
+
+
+PROMPT_VERSION = "translation-v3-contextual"
 
 
 class PromptBuilder:
     MODE_INSTRUCTIONS = {
-        TranslationMode.NATURAL: (
-            "TRANSLATION MODE: Natural Publishing Vietnamese (Văn phong xuất bản tự nhiên).\n"
-            "Priority: High fluency, idiomatic Vietnamese sentence structures, active voice, avoiding rigid word-by-word translation."
-        ),
-        TranslationMode.BALANCED: (
-            "TRANSLATION MODE: Balanced (Cân bằng).\n"
-            "Priority: Balance between Vietnamese naturalness and faithful structural alignment with the source text."
-        ),
-        TranslationMode.FAITHFUL: (
-            "TRANSLATION MODE: Faithful (Bám sát nguyên tác).\n"
-            "Priority: Close fidelity to original nuances, sentence clauses, and strict semantic accuracy."
-        ),
-        TranslationMode.ACADEMIC: (
-            "TRANSLATION MODE: Academic (Học thuật, Chuyên khảo).\n"
-            "Priority: Formal scholarly tone, rigorous specialist terminology, scholarly precision and objective syntax."
-        ),
-        TranslationMode.TECHNICAL: (
-            "TRANSLATION MODE: Technical (Kỹ thuật & Công nghệ).\n"
-            "Priority: Strict engineering precision. Keep standard technical terms, variables, equations, and identifiers intact."
-        ),
-        TranslationMode.CUSTOM: (
-            "TRANSLATION MODE: Custom Instructions.\n"
-        ),
+        TranslationMode.NATURAL: "Use Natural Vietnamese suitable for publishing and moderately restructure English syntax.",
+        TranslationMode.BALANCED: "Balance natural Vietnamese with close semantic alignment.",
+        TranslationMode.FAITHFUL: "Stay close to the source structure while keeping grammatical Vietnamese.",
+        TranslationMode.ACADEMIC: "Use formal scholarly Vietnamese with precise terminology.",
+        TranslationMode.TECHNICAL: "Prioritize technical accuracy and preserve identifiers.",
+        TranslationMode.CUSTOM: "Apply valid user preferences after all correctness rules.",
     }
-
-    FEW_SHOT_GUIDANCE = (
-        "\nFEW-SHOT QUALITY STANDARDS (Learn the natural Vietnamese transformation style):\n"
-        "Example 1:\n"
-        "Source: \"The decision was made by the board of directors with respect to the expansion of operations.\"\n"
-        "Natural Vietnamese: \"Hội đồng quản trị đã quyết định mở rộng quy mô hoạt động.\"\n"
-        "Example 2:\n"
-        "Source: \"It is crucial that risk management practices be implemented across all departments.\"\n"
-        "Natural Vietnamese: \"Việc triển khai các quy trình quản trị rủi ro trên toàn bộ các phòng ban là điều tối quan trọng.\"\n"
+    CONFLICTING_INSTRUCTION_PATTERNS = (
+        r"(?i)\btóm tắt\b", r"(?i)\brút gọn\b", r"(?i)\bbỏ (?:qua|bớt)\b",
+        r"(?i)\bsummar(?:y|ize)\b", r"(?i)\bom(?:it|ission)\b",
     )
 
     @classmethod
-    def filter_relevant_glossary(
-        cls,
-        nodes: List[DocumentNode],
-        glossary_terms: Optional[Dict[str, str]]
-    ) -> Dict[str, str]:
-        """
-        Token & focus optimization: Filters the global glossary to only include terms
-        that actually appear in the current batch of nodes.
-        """
-        if not glossary_terms:
-            return {}
+    def validate_custom_instructions(cls, custom_instructions: Optional[str]) -> None:
+        if custom_instructions and any(re.search(pattern, custom_instructions) for pattern in cls.CONFLICTING_INSTRUCTION_PATTERNS):
+            raise ValueError("Chỉ dẫn tùy chỉnh xung đột với yêu cầu dịch đầy đủ, không tóm tắt hoặc bỏ ý.")
 
-        combined_text = " ".join([n.content for n in nodes]).lower()
-        relevant: Dict[str, str] = {}
-        for src, tgt in glossary_terms.items():
-            if src.lower() in combined_text:
-                relevant[src] = tgt
-
-        # If batch is small and filtered list is empty, include up to 10 top terms if glossary is small
-        if not relevant and len(glossary_terms) <= 10:
-            return glossary_terms
-
-        return relevant
+    @classmethod
+    def filter_relevant_glossary(cls, nodes: List[DocumentNode], glossary_terms: Optional[Dict[str, str]]) -> Dict[str, str]:
+        combined = " ".join(node.content for node in nodes)
+        return {
+            source: target for source, target in (glossary_terms or {}).items()
+            if re.search(rf"(?i)(?<!\w){re.escape(source)}(?:s|es|ed|ing)?(?!\w)", combined)
+        }
 
     @classmethod
     def build_system_prompt(
@@ -72,32 +43,39 @@ class PromptBuilder:
         document_type: str = "GENERAL",
         translation_mode: TranslationMode = TranslationMode.NATURAL,
         style_guide: Optional[Dict[str, Any]] = None,
-        custom_instructions: Optional[str] = None
+        custom_instructions: Optional[str] = None,
+        register: Optional[str] = None,
+        sentence_style: Optional[str] = None,
     ) -> str:
-        base_core = (
-            "You are a master English-to-Vietnamese translator and publishing editor.\n\n"
-            "CORE TRANSLATION PRINCIPLES:\n"
-            "1. STRICT 100% VIETNAMESE LANGUAGE MANDATE: All translations MUST be completely in Vietnamese. "
-            "Under NO circumstances should any Chinese characters (中文字符 / Hán tự), Pinyin, or foreign scripts be included.\n"
-            "2. Produce highly natural, grammatically flawless Vietnamese suitable for printed books.\n"
-            "3. Restructure passive/clunky English clauses into active, clear Vietnamese sentences.\n"
-            "4. Strictly adhere to mandatory locked glossary terms whenever corresponding concepts appear.\n"
-            "5. Preserve formatting, markdown marks (**bold**, *italic*, # headings), numbers, dates, formulas, and units exactly ($100, 45%, 2026, Fig 1).\n"
-            "6. Do NOT summarize. Do NOT omit sentences. Do NOT hallucinate. Do NOT add conversational chatter or preambles.\n"
-            "7. Output MUST be strictly valid JSON matching the schema.\n"
-        )
-
-        doc_type_guide = f"\nDOCUMENT DOMAIN: {document_type}\n"
-        mode_guide = f"\n{cls.MODE_INSTRUCTIONS.get(translation_mode, '')}\n"
-
-        if translation_mode == TranslationMode.CUSTOM and custom_instructions:
-            mode_guide += f"USER INSTRUCTIONS: {custom_instructions}\n"
-
-        style_str = ""
+        cls.validate_custom_instructions(custom_instructions)
+        style_pack = get_style_pack(document_type)
+        layers = [
+            f"PROMPT VERSION: {PROMPT_VERSION}",
+            (
+                "SYSTEM CORE\nYou are a professional English-to-Vietnamese translator and Vietnamese publishing editor.\n"
+                "PRIORITY 1 - SEMANTIC FIDELITY: Preserve every proposition, condition, negation, causal relation, number, entity, reference and degree of certainty.\n"
+                "PRIORITY 2 - COMPLETENESS: Do not summarize, skip, compress, explain or add information.\n"
+                "PRIORITY 3 - TERMINOLOGY: Follow the locked glossary and established entity naming exactly.\n"
+                "PRIORITY 4 - NATURAL VIETNAMESE: Rewrite English syntax into idiomatic Vietnamese only after priorities 1-3 are satisfied.\n"
+                "PRIORITY 5 - STYLE: Maintain the document tone and approved preceding translation.\n"
+                "You may move adverbials, convert passive to active, reduce nominalization, split overly long sentences, merge short sentences when no meaning changes, and remove unnecessary possessives or pronouns.\n"
+                "Do not change facts, polarity, scope, modality or certainty. Preserve formatting, numbers, dates, formulas, units, URLs, code and references.\n"
+                "Vietnamese prose must be Vietnamese. Preserve proper nouns, company/product/trademark names, acronyms, programming identifiers, commands, paths, code, formulas and intentionally retained technical terms.\n"
+                "Avoid word-for-word calques such as 'with respect to', 'in terms of', 'in order to', 'there is/are', 'the fact that', 'make a decision', 'take action' and 'provide assistance' when Vietnamese has a direct natural construction."
+            ),
+            "TRANSLATION MODE\n" + cls.MODE_INSTRUCTIONS.get(translation_mode, cls.MODE_INSTRUCTIONS[TranslationMode.NATURAL]),
+            (
+                f"DOCUMENT DOMAIN\n{style_pack.domain}\nSTYLE PACK {STYLE_PACK_VERSION}\n"
+                f"Register: {register or style_pack.register}\nRules: {style_pack.instructions}\n"
+                f"Forbidden: {style_pack.forbidden}\nSentence restructuring: {sentence_style or 'moderate'}"
+            ),
+        ]
         if style_guide:
-            style_str = f"\nGLOBAL STYLE GUIDE:\n{json.dumps(style_guide, ensure_ascii=False, indent=2)}\n"
-
-        return f"{base_core}{doc_type_guide}{mode_guide}{cls.FEW_SHOT_GUIDANCE}{style_str}"
+            layers.append("DOCUMENT/USER STYLE SETUP\n" + json.dumps(style_guide, ensure_ascii=False, indent=2))
+        if custom_instructions:
+            layers.append("USER CUSTOM INSTRUCTION (lower priority than correctness and glossary)\n" + custom_instructions.strip())
+        layers.append("OUTPUT CONTRACT\nReturn strictly valid JSON matching the requested node mapping. Return every requested node exactly once and no unknown node IDs.")
+        return "\n\n".join(layers)
 
     @classmethod
     def build_user_prompt(
@@ -105,45 +83,43 @@ class PromptBuilder:
         nodes: List[DocumentNode],
         chapter_title: str = "",
         chapter_summary: str = "",
-        previous_context: str = "",
-        glossary_terms: Optional[Dict[str, str]] = None
+        previous_context: Any = "",
+        glossary_terms: Optional[Dict[str, str]] = None,
+        translation_context: Optional[TranslationContext] = None,
+        document_type: str = "GENERAL",
+        translation_mode: TranslationMode = TranslationMode.NATURAL,
     ) -> str:
-        parts = []
-
+        parts: List[str] = []
         if chapter_title:
-            parts.append(f"CURRENT CHAPTER: {chapter_title}")
-
-        if chapter_summary:
-            parts.append(f"CHAPTER CONTEXT & MEMORY:\n{chapter_summary}")
-
-        if previous_context:
-            parts.append(f"IMMEDIATELY PRECEDING TEXT (FOR COHERENCE REFERENCE ONLY - DO NOT TRANSLATE):\n{previous_context}")
-
-        relevant_glossary = cls.filter_relevant_glossary(nodes, glossary_terms)
+            parts.append("CURRENT CHAPTER\n" + chapter_title)
+        if translation_context:
+            if translation_context.document_memory:
+                parts.append("DOCUMENT MEMORY\n" + translation_context.document_memory)
+            if translation_context.chapter_memory:
+                parts.append("CHAPTER MEMORY\n" + translation_context.chapter_memory)
+            if translation_context.few_shots:
+                parts.append("DOMAIN EXAMPLES (style reference only)\n" + "\n".join(
+                    f"Source: {item['source']}\nNatural Vietnamese: {item['target']}" for item in translation_context.few_shots
+                ))
+            if translation_context.previous_context:
+                previous = "\n\n".join(
+                    f"SOURCE PREVIOUS:\n{item.source}\nAPPROVED VIETNAMESE:\n{item.translation}"
+                    for item in translation_context.previous_context
+                )
+                parts.append("PREVIOUS BILINGUAL CONTEXT - REFERENCE ONLY; DO NOT TRANSLATE IT AGAIN.\nUse only for terminology, pronouns, naming, tone, rhythm and discourse continuity.\n" + previous)
+            relevant_glossary = translation_context.glossary
+        else:
+            if chapter_summary:
+                parts.append("CHAPTER MEMORY\n" + chapter_summary)
+            if previous_context:
+                parts.append("PREVIOUS CONTEXT - REFERENCE ONLY; DO NOT TRANSLATE AGAIN\n" + str(previous_context))
+            relevant_glossary = cls.filter_relevant_glossary(nodes, glossary_terms)
+            shots = select_few_shots(document_type, translation_mode.value, nodes[0].type.value if nodes else "paragraph")
+            if shots:
+                parts.append("DOMAIN EXAMPLE\n" + "\n".join(f"Source: {item['source']}\nNatural Vietnamese: {item['target']}" for item in shots))
         if relevant_glossary:
-            glossary_list = [f"- \"{k}\" -> \"{v}\"" for k, v in relevant_glossary.items()]
-            parts.append("MANDATORY LOCKED GLOSSARY (You must use these exact Vietnamese terms):\n" + "\n".join(glossary_list))
-
-        blocks_json = []
-        for n in nodes:
-            blocks_json.append({
-                "node_id": n.id,
-                "type": n.type.value,
-                "text": n.content
-            })
-
-        parts.append(
-            "BLOCKS TO TRANSLATE:\n"
-            f"{json.dumps(blocks_json, ensure_ascii=False, indent=2)}\n\n"
-            "CRITICAL: Translate 100% into Vietnamese. Absolutely NO Chinese characters (中文字符) or foreign text allowed.\n\n"
-            "REQUIRED JSON RESPONSE FORMAT:\n"
-            "{\n"
-            "  \"translations\": [\n"
-            "    {\"node_id\": \"...\", \"text\": \"...\"}\n"
-            "  ]\n"
-            "}"
-        )
-
+            parts.append("MANDATORY LOCKED GLOSSARY\n" + "\n".join(f'- "{source}" -> "{target}"' for source, target in relevant_glossary.items()))
+        blocks = [{"node_id": node.id, "type": node.type.value, "text": node.content} for node in nodes]
+        parts.append("CURRENT SOURCE BLOCKS\n" + json.dumps(blocks, ensure_ascii=False, indent=2))
+        parts.append("Translate CURRENT SOURCE BLOCKS only. Preserve all meaning and return every node exactly once.\nREQUIRED JSON RESPONSE FORMAT\n" + '{"translations":[{"node_id":"...","text":"..."}]}')
         return "\n\n".join(parts)
-
-

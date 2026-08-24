@@ -299,7 +299,7 @@ class TranslationRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def save_node_translation(self, node_id: str, project_id: str, translated_text: str, model_name: str = "", instruction: Optional[str] = None, created_by: str = "ai") -> TranslationModel:
+    def save_node_translation(self, node_id: str, project_id: str, translated_text: str, model_name: str = "", instruction: Optional[str] = None, created_by: str = "ai", prompt_version: str = "v1", latency_ms: float = 0.0) -> TranslationModel:
         node = self.db.query(NodeModel).filter(NodeModel.id == node_id).first()
         if not node:
             raise ValueError(f"Node {node_id} not found")
@@ -316,6 +316,8 @@ class TranslationRepository:
             project_id=project_id,
             translated_text=translated_text,
             model_name=model_name,
+            prompt_version=prompt_version,
+            latency_ms=latency_ms,
         )
         self.db.add(trans)
         

@@ -23,6 +23,9 @@
 
 # Model cache & download directories
 models/
+# Cho phép theo dõi package schema của ứng dụng; các thư mục model AI khác vẫn bị bỏ qua.
+!backend/app/models/
+!backend/app/models/*.py
 weights/
 checkpoints/
 model_cache/

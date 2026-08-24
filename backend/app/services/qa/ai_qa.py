@@ -23,7 +23,17 @@ class AIQAEngine:
                 model=model_name
             )
 
-            if not result.get("is_passed", True):
+            if result.get("status") == "ERROR" or result.get("error"):
+                return {
+                    "issue_type": "QA_ERROR",
+                    "severity": "ERROR",
+                    "message": result.get("error") or "Dịch vụ AI QA trả về kết quả không hợp lệ.",
+                    "source_snippet": node.content[:150],
+                    "translation_snippet": node.translated_content[:150],
+                    "suggested_fix": "Kiểm tra provider rồi chạy lại QA. Không coi lỗi này là đạt.",
+                }
+
+            if not result.get("is_passed", False):
                 issues = result.get("issues", [])
                 msg = "; ".join(issues) if issues else "Bản dịch có thể chưa hoàn toàn chuẩn xác hoặc tự nhiên."
                 return {
@@ -34,7 +44,14 @@ class AIQAEngine:
                     "translation_snippet": node.translated_content[:150],
                     "suggested_fix": result.get("suggested_revision")
                 }
-        except Exception as e:
-            print(f"[AI QA] Error evaluating node {node.id}: {e}")
+        except Exception as exc:
+            return {
+                "issue_type": "QA_ERROR",
+                "severity": "ERROR",
+                "message": f"AI QA thất bại: {exc}",
+                "source_snippet": node.content[:150],
+                "translation_snippet": node.translated_content[:150],
+                "suggested_fix": "Kiểm tra provider rồi chạy lại QA.",
+            }
 
         return None

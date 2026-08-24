@@ -86,32 +86,41 @@ class PDFExporter:
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
             
-            pagesize = A5 if profile.page_size == "A5" else A4
+            # Default của SQLAlchemy chỉ được gán khi flush; fallback phải tự bảo vệ object tạm.
+            pagesize = A5 if (profile.page_size or "A5") == "A5" else A4
+            margin_right = profile.margin_right_mm if profile.margin_right_mm is not None else 20.0
+            margin_left = profile.margin_left_mm if profile.margin_left_mm is not None else 20.0
+            margin_top = profile.margin_top_mm if profile.margin_top_mm is not None else 20.0
+            margin_bottom = profile.margin_bottom_mm if profile.margin_bottom_mm is not None else 20.0
+            body_font_size = profile.body_font_size_pt if profile.body_font_size_pt is not None else 11.0
+            line_height = profile.line_height if profile.line_height is not None else 1.5
+            first_line_indent = profile.first_line_indent_mm if profile.first_line_indent_mm is not None else 5.0
+            paragraph_spacing = profile.paragraph_spacing_pt if profile.paragraph_spacing_pt is not None else 4.0
             doc_template = SimpleDocTemplate(
                 str(output_path),
                 pagesize=pagesize,
-                rightMargin=profile.margin_right_mm * 2.83,
-                leftMargin=profile.margin_left_mm * 2.83,
-                topMargin=profile.margin_top_mm * 2.83,
-                bottomMargin=profile.margin_bottom_mm * 2.83
+                rightMargin=margin_right * 2.83,
+                leftMargin=margin_left * 2.83,
+                topMargin=margin_top * 2.83,
+                bottomMargin=margin_bottom * 2.83
             )
 
             styles = getSampleStyleSheet()
             title_style = ParagraphStyle(
                 'ChapterTitle',
                 parent=styles['Heading1'],
-                fontSize=profile.body_font_size_pt * 1.6,
-                leading=profile.body_font_size_pt * 2.0,
-                alignment=1, # Center
+                fontSize=body_font_size * 1.6,
+                leading=body_font_size * 2.0,
+                alignment=1,  # Căn giữa
                 spaceAfter=15
             )
             body_style = ParagraphStyle(
                 'Body',
                 parent=styles['Normal'],
-                fontSize=profile.body_font_size_pt,
-                leading=profile.body_font_size_pt * profile.line_height,
-                firstLineIndent=profile.first_line_indent_mm * 2.83,
-                spaceAfter=profile.paragraph_spacing_pt
+                fontSize=body_font_size,
+                leading=body_font_size * line_height,
+                firstLineIndent=first_line_indent * 2.83,
+                spaceAfter=paragraph_spacing
             )
 
             story = []
@@ -127,7 +136,7 @@ class PDFExporter:
                         lvl_style = ParagraphStyle(
                             'Heading',
                             parent=title_style,
-                            fontSize=profile.body_font_size_pt * 1.3,
+                            fontSize=body_font_size * 1.3,
                             alignment=0,
                             spaceBefore=10,
                             spaceAfter=5

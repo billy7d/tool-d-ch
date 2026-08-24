@@ -12,9 +12,11 @@ import {
   ArrowRight,
   HelpCircle,
   FileCode,
+  RefreshCw,
+  CheckCircle2,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
-import { Project, GlossaryItem, TranslationMode, DocumentType, HardwareInfo } from '../types';
+import { Project, GlossaryItem, TranslationMode, DocumentType, HardwareInfo, TranslationPreviewResponse } from '../types';
 
 interface Step4SetupProps {
   project: Project;
@@ -31,6 +33,10 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
   const [glossary, setGlossary] = useState<GlossaryItem[]>([]);
   const [loadingGlossary, setLoadingGlossary] = useState(true);
   const [extracting, setExtracting] = useState(false);
+  const [register, setRegister] = useState<string>((project.style_guide?.register as string) || 'ACCESSIBLE');
+  const [sentenceStyle, setSentenceStyle] = useState<string>((project.style_guide?.sentence_style as string) || 'MODERATE');
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<TranslationPreviewResponse | null>(null);
 
   // New term modal
   const [showAddTerm, setShowAddTerm] = useState(false);
@@ -60,11 +66,47 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
         document_type: documentType,
         selected_model: selectedModel,
         custom_instructions: customInstructions,
+        style_guide: { ...(project.style_guide || {}), register, sentence_style: sentenceStyle },
       });
       onRefreshProject();
       onNext();
     } catch (e) {
       alert('Lỗi lưu cấu hình: ' + e);
+    }
+  };
+
+  const handlePreview = async () => {
+    setPreviewing(true);
+    try {
+      const result = await apiClient.previewTranslation(project.id, {
+        model_name: selectedModel,
+        translation_mode: translationMode,
+        document_type: documentType,
+        custom_instructions: customInstructions,
+        style_register: register,
+        sentence_style: sentenceStyle,
+      });
+      setPreview(result);
+    } catch (e: any) {
+      alert('Không thể dịch thử: ' + (e?.response?.data?.detail || e));
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const handleAcceptStyle = async () => {
+    try {
+      await apiClient.updateProject(project.id, {
+        translation_mode: translationMode,
+        document_type: documentType,
+        selected_model: selectedModel,
+        custom_instructions: customInstructions,
+        style_guide: { ...(project.style_guide || {}), register, sentence_style: sentenceStyle },
+      });
+      onRefreshProject();
+      alert('Đã chấp nhận và lưu phong cách dịch thử.');
+    } catch (e) {
+      alert('Không thể lưu phong cách: ' + e);
     }
   };
 
@@ -222,6 +264,26 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
             />
           </div>
 
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">Sắc thái</label>
+              <select value={register} onChange={(e) => setRegister(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white">
+                <option value="FORMAL">Trang trọng</option>
+                <option value="NEUTRAL">Trung tính</option>
+                <option value="ACCESSIBLE">Dễ tiếp cận</option>
+                <option value="CONVERSATIONAL">Gần gũi</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">Tái cấu trúc câu</label>
+              <select value={sentenceStyle} onChange={(e) => setSentenceStyle(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white">
+                <option value="PRESERVE">Giữ cấu trúc</option>
+                <option value="MODERATE">Điều chỉnh vừa phải</option>
+                <option value="FREE">Tự nhiên linh hoạt</option>
+              </select>
+            </div>
+          </div>
+
           {/* Engine Optimizations Info */}
           <div className="bg-sky-500/10 border border-sky-500/20 rounded-xl p-3.5 space-y-1.5">
             <div className="flex items-center space-x-2 text-sky-400 font-semibold text-xs">
@@ -229,8 +291,8 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
               <span>Đã kích hoạt Bộ tối ưu Tốc độ & Độ chính xác cao</span>
             </div>
             <ul className="text-[11px] text-slate-400 space-y-1 pl-4 list-disc">
-              <li><strong className="text-slate-300">Tốc độ cao:</strong> Dynamic Batching 750 tokens, HTTP Keep-Alive Session, giữ model liên tục trên VRAM.</li>
-              <li><strong className="text-slate-300">Độ chính xác xuất bản:</strong> Few-Shot In-Context Learning tiếng Việt, tự động chuẩn hóa dấu câu và trích xuất Glossary theo ngữ cảnh.</li>
+              <li><strong className="text-slate-300">Ngữ cảnh thích ứng:</strong> Ngân sách chunk tính theo model, memory và phần output cần dự trữ.</li>
+              <li><strong className="text-slate-300">Độ chính xác xuất bản:</strong> Document profile, chapter memory, ngữ cảnh song ngữ và Quality Gate Phase 1.</li>
             </ul>
           </div>
         </div>
@@ -328,6 +390,33 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
             </a>
           </div>
         </div>
+      </div>
+
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-bold text-white flex items-center gap-2"><BookA className="w-4 h-4 text-sky-400" />Dịch thử theo ngữ cảnh</h3>
+            <p className="text-[11px] text-slate-400 mt-1">Xem 5–7 đoạn đại diện trước khi dịch toàn bộ. Kết quả này không ghi vào bản dịch chính.</p>
+          </div>
+          <button onClick={handlePreview} disabled={previewing} className="shrink-0 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-xs font-semibold">
+            {previewing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            <span>{previewing ? 'Đang dịch thử...' : preview ? 'Tạo lại bản dịch thử' : 'Dịch thử'}</span>
+          </button>
+        </div>
+        {preview && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-[11px] text-sky-300">Profile: {preview.profile.document_type} · {preview.profile.tone} · {preview.prompt_version}</div>
+              <button onClick={handleAcceptStyle} className="px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold">Chấp nhận phong cách</button>
+            </div>
+            {preview.samples.map((sample) => (
+              <div key={sample.node_id} className="grid md:grid-cols-2 gap-3 bg-slate-950 border border-slate-800 rounded-xl p-4">
+                <div><span className="text-[10px] uppercase text-slate-500">Nguồn</span><p className="text-xs text-slate-300 mt-1 leading-relaxed">{sample.source}</p></div>
+                <div><span className="text-[10px] uppercase text-slate-500 flex items-center gap-1">Tiếng Việt {sample.quality.passed && <CheckCircle2 className="w-3 h-3 text-emerald-400" />}</span><p className="text-xs text-white mt-1 leading-relaxed">{sample.translation || 'Mô hình chưa trả về bản dịch hợp lệ.'}</p></div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Save & Proceed button */}

@@ -102,8 +102,10 @@ class MockProvider(TranslationProvider):
         model: Optional[str] = None
     ) -> Dict[str, Any]:
         return {
+            "status": "PASS",
             "is_passed": True,
             "score": 0.98,
             "issues": [],
-            "suggested_revision": ""
+            "suggested_revision": "",
+            "error": None,
         }

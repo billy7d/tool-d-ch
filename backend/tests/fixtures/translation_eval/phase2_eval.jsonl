@@ -1,0 +1,56 @@
+{"domain":"GENERAL","source":"It is important to note that the plan was changed in order to reduce delays."}
+{"domain":"GENERAL","source":"There are three reasons why the proposal should not be rejected."}
+{"domain":"GENERAL","source":"The report, which was published in 2025, refers to Figure 3 and Appendix A."}
+{"domain":"GENERAL","source":"With respect to the second issue, the team decided to take action immediately."}
+{"domain":"GENERAL","source":"Unless the weather improves, the event will remain temporarily suspended."}
+{"domain":"GENERAL","source":"Dr. Smith entered the room. She placed the files on the table.","chapter_context":"Dr. Smith là nữ bác sĩ."}
+{"domain":"GENERAL","source":"The device weighs 2.5 kg and operates between -10°C and 40°C."}
+{"domain":"BUSINESS","source":"The company has taken significant steps toward improving operational efficiency."}
+{"domain":"BUSINESS","source":"The decision was made by the board with the aim of expanding operations."}
+{"domain":"BUSINESS","source":"Revenue increased by 10%, but operating costs rose by approximately 8%."}
+{"domain":"BUSINESS","source":"If demand remains weak, management may postpone the product launch."}
+{"domain":"BUSINESS","source":"Goldman Sachs said the firm would review its strategy in the next quarter."}
+{"domain":"BUSINESS","source":"The organization provided assistance to employees affected by the restructuring."}
+{"domain":"BUSINESS","source":"Our long-term objective is to build a more resilient supply chain."}
+{"domain":"FINANCE","source":"Revenue rose 12%, while the debt-to-equity ratio remained at 0.8."}
+{"domain":"FINANCE","source":"The Federal Reserve raised the target rate by 0.25 percentage points.","glossary":{"Federal Reserve":"Cục Dự trữ Liên bang Mỹ"}}
+{"domain":"FINANCE","source":"Net cash flow was negative despite a 15% increase in gross profit.","glossary":{"cash flow":"dòng tiền"}}
+{"domain":"FINANCE","source":"The bond may be redeemed early only under the conditions described in Section 4."}
+{"domain":"FINANCE","source":"Investors should not interpret past performance as a guarantee of future returns."}
+{"domain":"FINANCE","source":"Compound interest can materially increase the value of a long-term investment.","glossary":{"compound interest":"lãi kép"}}
+{"domain":"FINANCE","source":"The portfolio allocation is 60% equities, 30% bonds, and 10% cash."}
+{"domain":"SELF_HELP","source":"Taking action is often more useful than waiting for the perfect moment."}
+{"domain":"SELF_HELP","source":"You do not need to change everything at once; begin with one small habit."}
+{"domain":"SELF_HELP","source":"The fact that you failed once does not mean that you cannot succeed."}
+{"domain":"SELF_HELP","source":"When your motivation fades, return to the reason you started."}
+{"domain":"SELF_HELP","source":"Make a decision about what matters most, then protect time for it."}
+{"domain":"SELF_HELP","source":"Progress may be slow, but it is still progress."}
+{"domain":"SELF_HELP","source":"Ask for assistance before exhaustion turns a manageable problem into a crisis."}
+{"domain":"TECHNICAL","source":"Call the HTTP API with curl, then parse the JSON response in Python."}
+{"domain":"TECHNICAL","source":"Do not rename UserService.getById() because external clients depend on it."}
+{"domain":"TECHNICAL","source":"If CUDA is unavailable, PyTorch falls back to the CPU without changing the result."}
+{"domain":"TECHNICAL","source":"Run npm install before executing the build command in C:\\workspace\\app."}
+{"domain":"TECHNICAL","source":"The server returns HTTP 429 when the rate limit has been exceeded."}
+{"domain":"TECHNICAL","source":"A neural network is trained on batches of 64 samples.","glossary":{"neural network":"mạng nơ-ron"}}
+{"domain":"TECHNICAL","source":"The function must preserve null values and must not mutate the input array."}
+{"domain":"ACADEMIC","source":"The optimization of the structure resulted in a measurable improvement."}
+{"domain":"ACADEMIC","source":"Although the correlation was significant, causality could not be established."}
+{"domain":"ACADEMIC","source":"Participants were excluded if they had received treatment within 30 days."}
+{"domain":"ACADEMIC","source":"The findings are consistent with those reported by Nguyen et al. (2024)."}
+{"domain":"ACADEMIC","source":"There is insufficient evidence to reject the null hypothesis."}
+{"domain":"ACADEMIC","source":"The experiment was repeated three times under identical conditions."}
+{"domain":"ACADEMIC","source":"Further research is required before these results can be generalized."}
+{"domain":"LEGAL","source":"The licensee may terminate this Agreement only if written notice is provided 30 days in advance."}
+{"domain":"LEGAL","source":"Nothing in this clause shall be construed as a waiver of either party's rights."}
+{"domain":"LEGAL","source":"The supplier must not disclose Confidential Information except as required by law."}
+{"domain":"LEGAL","source":"If any provision is held invalid, the remaining provisions shall remain in effect."}
+{"domain":"LEGAL","source":"The buyer is liable for taxes imposed after the Effective Date."}
+{"domain":"LEGAL","source":"This Agreement does not create an employment, agency, or partnership relationship."}
+{"domain":"LEGAL","source":"Claims must be submitted within six months of the date of loss."}
+{"domain":"LITERATURE","node_type":"quote","source":"\"You came back,\" she said, barely above a whisper."}
+{"domain":"LITERATURE","source":"Rain pressed against the windows as the old house settled into silence."}
+{"domain":"LITERATURE","source":"He had promised not to return, yet every road seemed to lead him home."}
+{"domain":"LITERATURE","node_type":"quote","source":"\"I never said I was afraid,\" Minh replied."}
+{"domain":"LITERATURE","source":"For a moment, she mistook the shadow for her father."}
+{"domain":"LITERATURE","source":"The letter remained unopened beneath the clock until morning."}
+{"domain":"LITERATURE","source":"They laughed, not because the joke was funny, but because the alternative was to cry."}

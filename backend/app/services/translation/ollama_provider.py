@@ -6,7 +6,8 @@ from urllib3.util.retry import Retry
 from typing import List, Dict, Any, Optional
 from app.config import settings
 from app.services.translation.provider_base import TranslationProvider
-from app.services.translation.json_parser import clean_and_parse_llm_json
+from app.services.translation.json_parser import parse_translation_batch_strict
+from app.services.qa.result_validator import qa_error, validate_qa_result
 
 
 class OllamaProvider(TranslationProvider):
@@ -51,6 +52,7 @@ class OllamaProvider(TranslationProvider):
     ) -> List[Dict[str, str]]:
         target_model = model or self.default_model
         expected_ids = [b.get("id") or b.get("node_id", "") for b in blocks if b.get("id") or b.get("node_id")]
+        capabilities = self.get_model_capabilities(target_model)
 
         payload = {
             "model": target_model,
@@ -65,7 +67,7 @@ class OllamaProvider(TranslationProvider):
                 "temperature": temperature,
                 "top_p": 0.9,
                 "repeat_penalty": 1.1,
-                "num_ctx": 4096,
+                "num_ctx": capabilities.recommended_context_window,
             }
         }
 
@@ -74,9 +76,14 @@ class OllamaProvider(TranslationProvider):
             if res.status_code == 200:
                 resp_json = res.json()
                 content = resp_json.get("message", {}).get("content", "")
-                parsed_translations = clean_and_parse_llm_json(content, expected_node_ids=expected_ids)
-                if parsed_translations:
-                    return parsed_translations
+                parsed = parse_translation_batch_strict(content, expected_ids)
+                if parsed.duplicate_ids or parsed.unknown_ids or parsed.raw_error:
+                    raise RuntimeError(
+                        f"Ollama batch mapping invalid: duplicate={parsed.duplicate_ids}, "
+                        f"unknown={parsed.unknown_ids}, error={parsed.raw_error}"
+                    )
+                if parsed.translations:
+                    return parsed.translations
                 raise RuntimeError(f"Ollama returned unparsable content: {content[:200]}")
             else:
                 raise RuntimeError(f"Ollama error {res.status_code}: {res.text}")
@@ -96,6 +103,7 @@ class OllamaProvider(TranslationProvider):
         Does not rely on complex multi-item JSON batches.
         """
         target_model = model or self.default_model
+        capabilities = self.get_model_capabilities(target_model)
         
         glossary_hint = ""
         if glossary_terms:
@@ -109,7 +117,8 @@ class OllamaProvider(TranslationProvider):
             f"1. Chỉ trả về VĂN BẢN THUẦN (Plain text), TUYỆT ĐỐI KHÔNG dùng JSON, KHÔNG bọc vào {{...}}.\n"
             f"2. TUYỆT ĐỐI KHÔNG thêm bất kỳ ghi chú, phần 'Lưu ý', lời giải thích hay lời chào nào.\n"
             f"3. Dịch ĐẦY ĐỦ 100% tất cả các câu từ đầu đến cuối, không được ngắt quãng hay bỏ lửng.\n"
-            f"4. 100% tiếng Việt thuần túy, TUYỆT ĐỐI KHÔNG CHỨA CHỮ HÁN hay dấu câu tiếng Trung (，。；)."
+            f"4. Văn xuôi phải bằng tiếng Việt; được giữ nguyên tên riêng, nhãn hiệu, acronym, URL, code và identifier khi phù hợp.\n"
+            f"5. Không đưa thêm ký tự CJK không có trong nguồn hoặc glossary bắt buộc."
         )
 
         payload = {
@@ -124,7 +133,7 @@ class OllamaProvider(TranslationProvider):
                 "temperature": temperature,
                 "top_p": 0.85,
                 "repeat_penalty": 1.25,
-                "num_ctx": 4096,
+                "num_ctx": capabilities.recommended_context_window,
             }
         }
 
@@ -154,6 +163,7 @@ class OllamaProvider(TranslationProvider):
         model: Optional[str] = None
     ) -> str:
         target_model = model or self.default_model
+        capabilities = self.get_model_capabilities(target_model)
         sys_msg = (
             "You are an expert Vietnamese book editor and translator.\n"
             "Produce a refined, publishing-quality Vietnamese translation of the given English source text according to the user instruction.\n"
@@ -190,7 +200,7 @@ class OllamaProvider(TranslationProvider):
                 "temperature": 0.15,
                 "top_p": 0.85,
                 "repeat_penalty": 1.25,
-                "num_ctx": 4096,
+                "num_ctx": capabilities.recommended_context_window,
             }
         }
 
@@ -299,8 +309,7 @@ class OllamaProvider(TranslationProvider):
             res = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
             if res.status_code == 200:
                 content = res.json().get("message", {}).get("content", "")
-                return json.loads(content)
-        except Exception:
-            pass
-        return {"is_passed": True, "score": 1.0, "issues": [], "suggested_revision": ""}
-
+                return validate_qa_result(json.loads(content))
+            return qa_error(f"Ollama QA HTTP {res.status_code}: {res.text[:200]}")
+        except Exception as exc:
+            return qa_error(f"Ollama QA error: {exc}")

@@ -5,7 +5,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from typing import List, Dict, Any, Optional
 from app.services.translation.provider_base import TranslationProvider
-from app.services.translation.json_parser import clean_and_parse_llm_json
+from app.services.translation.json_parser import parse_translation_batch_strict
+from app.services.qa.result_validator import qa_error, validate_qa_result
 
 
 class OpenAILocalProvider(TranslationProvider):
@@ -73,9 +74,14 @@ class OpenAILocalProvider(TranslationProvider):
             res = self.session.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=payload, timeout=180.0)
             if res.status_code == 200:
                 content = res.json()["choices"][0]["message"]["content"]
-                parsed_translations = clean_and_parse_llm_json(content, expected_node_ids=expected_ids)
-                if parsed_translations:
-                    return parsed_translations
+                parsed = parse_translation_batch_strict(content, expected_ids)
+                if parsed.duplicate_ids or parsed.unknown_ids or parsed.raw_error:
+                    raise RuntimeError(
+                        f"Local AI batch mapping invalid: duplicate={parsed.duplicate_ids}, "
+                        f"unknown={parsed.unknown_ids}, error={parsed.raw_error}"
+                    )
+                if parsed.translations:
+                    return parsed.translations
                 raise RuntimeError(f"Local AI returned unparsable JSON: {content[:200]}")
             else:
                 raise RuntimeError(f"OpenAI Local error {res.status_code}: {res.text}")
@@ -101,9 +107,10 @@ class OpenAILocalProvider(TranslationProvider):
             f"Hãy dịch chính xác đoạn văn bản sau sang tiếng Việt tự nhiên, chuẩn xác, đúng ngữ pháp:\n\n"
             f"{text}\n\n"
             f"YÊU CẦU BẮT BUỘC:\n"
-            f"1. Bản dịch phải là 100% TIẾNG VIỆT HOÀN CHỈNH.\n"
-            f"2. Tuyệt đối KHÔNG ĐƯỢC chứa chữ Hán / tiếng Trung Quốc (中文字符) hay bất kỳ chữ Hán nào.\n"
-            f"3. Chỉ trả về duy nhất nội dung bản dịch tiếng Việt, không thêm lời chào, giải thích hay định dạng thừa."
+            f"1. Văn xuôi phải bằng tiếng Việt; dịch đủ mọi ý, không tóm tắt hoặc bỏ câu.\n"
+            f"2. Giữ nguyên tên riêng, nhãn hiệu, acronym, URL, code và identifier khi phù hợp.\n"
+            f"3. Không đưa thêm ký tự CJK không có trong nguồn hoặc glossary bắt buộc.\n"
+            f"4. Chỉ trả về nội dung bản dịch, không thêm lời chào, giải thích hay định dạng thừa."
         )
 
 
@@ -168,4 +175,35 @@ class OpenAILocalProvider(TranslationProvider):
         return []
 
     def review_translation(self, source_text: str, translated_text: str, glossary_terms: Dict[str, str], model: Optional[str] = None) -> Dict[str, Any]:
-        return {"is_passed": True, "score": 1.0, "issues": [], "suggested_revision": ""}
+        target_model = model or self.default_model
+        system_message = (
+            "Evaluate the English-to-Vietnamese translation for accuracy, omissions, "
+            "hallucinations and locked glossary compliance. Return only JSON with "
+            "is_passed, score, issues and suggested_revision."
+        )
+        user_message = (
+            f"SOURCE:\n{source_text}\n\nTRANSLATION:\n{translated_text}\n\n"
+            f"GLOSSARY:\n{json.dumps(glossary_terms, ensure_ascii=False)}"
+        )
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            response = self.session.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(),
+                json=payload,
+                timeout=60.0,
+            )
+            if response.status_code != 200:
+                return qa_error(f"OpenAI Local QA HTTP {response.status_code}: {response.text[:200]}")
+            content = response.json()["choices"][0]["message"]["content"]
+            return validate_qa_result(json.loads(content))
+        except Exception as exc:
+            return qa_error(f"OpenAI Local QA error: {exc}")

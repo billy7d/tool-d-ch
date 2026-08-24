@@ -206,6 +206,16 @@ class VietnamesePostProcessor:
 
         return cleaned
 
+    @staticmethod
+    def normalize_safely(text: str) -> str:
+        """Chỉ chuẩn hóa khoảng trắng, không xóa ký tự hoặc câu của candidate."""
+        if not text:
+            return ""
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"[ \t]+", " ", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
+
     @classmethod
     def enforce_locked_glossary(
         cls,
@@ -213,17 +223,5 @@ class VietnamesePostProcessor:
         source_text: str,
         locked_glossary: Optional[Dict[str, str]] = None
     ) -> str:
-        """
-        Guarantees that if a source English term was present in the source text,
-        its mandatory locked target term is strictly adhered to in the translated text.
-        """
-        if not locked_glossary or not translated_text or not source_text:
-            return translated_text
-
-        result = translated_text
-        for src_term, tgt_term in locked_glossary.items():
-            pattern = r'\b' + re.escape(src_term) + r'\b'
-            if re.search(pattern, source_text, re.IGNORECASE):
-                pass
-
-        return result
+        """Giữ API cũ nhưng không rewrite mù; Quality Gate chịu trách nhiệm từ chối."""
+        return translated_text
