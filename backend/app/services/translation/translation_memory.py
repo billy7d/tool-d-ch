@@ -3,6 +3,7 @@ import uuid
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.db.models import TranslationMemoryModel
+from app.services.translation.quality_gate import TranslationQualityGate
 
 
 class TranslationMemoryService:
@@ -48,6 +49,10 @@ class TranslationMemoryService:
             raise ValueError("TM Phase 1 yêu cầu đầy đủ style_hash, glossary_hash và prompt_version")
         if not translated_text or not translated_text.strip():
             raise ValueError("Không được lưu bản dịch rỗng vào TM")
+        quality = TranslationQualityGate().validate(source_text, translated_text, {})
+        if not quality.passed:
+            codes = ", ".join(issue["code"] for issue in quality.issues if issue["severity"] == "ERROR")
+            raise ValueError(f"Không được lưu candidate không qua Quality Gate vào TM: {codes}")
         source_hash = cls.compute_hash(source_text)
         existing = db.query(TranslationMemoryModel).filter(
             TranslationMemoryModel.source_hash == source_hash,

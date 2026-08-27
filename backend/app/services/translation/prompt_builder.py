@@ -8,6 +8,7 @@ from app.services.translation.context_assembler import TranslationContext
 from app.services.translation.prompt_profiles import STYLE_PACK_VERSION, get_style_pack, select_few_shots
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import PROMPT_VERSION
+from app.services.translation.term_matcher import TermMatcher
 
 
 class PromptBuilder:
@@ -112,7 +113,7 @@ class PromptBuilder:
         combined = " ".join(node.content for node in nodes)
         return {
             source: target for source, target in (glossary_terms or {}).items()
-            if re.search(rf"(?i)(?<!\w){re.escape(source)}(?:s|es|ed|ing)?(?!\w)", combined)
+            if TermMatcher.contains(combined, source)
         }
 
     @staticmethod
@@ -123,7 +124,11 @@ class PromptBuilder:
         if not context:
             return parts
         if context.document_memory:
-            parts.append("DOCUMENT MEMORY\n" + context.document_memory)
+            parts.append(
+                "SOURCE DOCUMENT CHARACTERISTICS - DESCRIPTIVE ONLY\n"
+                "These observations describe the source. They must not override TARGET register, sentence style, "
+                "translation mode, locked glossary or user instructions.\n" + context.document_memory
+            )
         if context.chapter_memory:
             parts.append("CHAPTER MEMORY\n" + context.chapter_memory)
         if context.few_shots:

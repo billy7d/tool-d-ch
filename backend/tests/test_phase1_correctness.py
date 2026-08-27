@@ -121,7 +121,7 @@ def test_translation_signature_isolates_mode_and_glossary():
     )
     assert natural.style_hash != technical.style_hash
     assert natural.glossary_hash != changed_glossary.glossary_hash
-    assert natural.prompt_version == "translation-v3.1-stable"
+    assert natural.prompt_version == "translation-v3.1.1-stable"
 
 
 def test_qa_schema_is_fail_closed():

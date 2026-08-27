@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 from app.services.translation.provider_base import TranslationProvider
+from app.services.translation.term_matcher import TermMatcher
 
 
 class MockProvider(TranslationProvider):
@@ -65,8 +66,8 @@ class MockProvider(TranslationProvider):
                 vi_text = vi_text.replace(en, vi)
         if glossary_terms:
             for en_term, vi_term in glossary_terms.items():
-                if en_term.lower() in text.lower():
-                    vi_text = vi_text.replace(en_term, vi_term)
+                if TermMatcher.contains(text, en_term):
+                    vi_text = TermMatcher.pattern(en_term).sub(vi_term, vi_text)
         return vi_text
 
 
@@ -81,6 +82,24 @@ class MockProvider(TranslationProvider):
 
     def summarize_context(self, text_sample: str, model: Optional[str] = None, max_input_chars: Optional[int] = 4000) -> str:
         return "- Chủ đề: Tài chính và Đầu tư\n- Thuật ngữ chính: Dòng tiền, Lãi kép\n- Văn phong: Tự nhiên, rõ ràng"
+
+    def build_chapter_memory(
+        self,
+        text_sample: str,
+        chapter_title: str,
+        document_type: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "summary": f"Chương '{chapter_title}' thuộc lĩnh vực {document_type}.",
+            "entities": [],
+            "key_concepts": [],
+            "tone": "Rõ ràng, nhất quán.",
+            "pronoun_notes": [],
+            "terminology": [],
+            "important_facts": [],
+            "style_notes": [],
+        }
 
     def extract_glossary(
         self,

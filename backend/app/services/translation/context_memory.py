@@ -11,7 +11,56 @@ from sqlalchemy.orm import Session
 from app.db.models import NodeModel
 
 
-CHAPTER_MEMORY_VERSION = "chapter-memory-v2"
+CHAPTER_MEMORY_VERSION = "chapter-memory-v3-structured"
+CHAPTER_MEMORY_PROMPT_VERSION = "chapter-memory-prompt-v3-json"
+CHAPTER_MEMORY_FIELDS = {
+    "summary", "entities", "key_concepts", "tone", "pronoun_notes",
+    "terminology", "important_facts", "style_notes",
+}
+CHAPTER_MEMORY_LIST_LIMITS = {
+    "entities": 20,
+    "key_concepts": 15,
+    "pronoun_notes": 10,
+    "terminology": 30,
+    "important_facts": 15,
+    "style_notes": 10,
+}
+
+
+def validate_chapter_memory_response(value: Any) -> Dict[str, Any]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict) or set(value) != CHAPTER_MEMORY_FIELDS:
+        raise ValueError("Chapter Memory phải là object đúng schema.")
+    if not isinstance(value["summary"], str) or len(value["summary"]) > 1800:
+        raise ValueError("Chapter Memory summary không hợp lệ.")
+    if not isinstance(value["tone"], str) or len(value["tone"]) > 500:
+        raise ValueError("Chapter Memory tone không hợp lệ.")
+    normalized: Dict[str, Any] = {"summary": value["summary"].strip(), "tone": value["tone"].strip()}
+    for field_name, limit in CHAPTER_MEMORY_LIST_LIMITS.items():
+        items = value[field_name]
+        if not isinstance(items, list) or len(items) > limit:
+            raise ValueError(f"Chapter Memory {field_name} không hợp lệ.")
+        if field_name in {"entities", "terminology"}:
+            if not all(
+                isinstance(item, dict)
+                and set(item) == {"source", "preferred"}
+                and isinstance(item["source"], str)
+                and isinstance(item["preferred"], str)
+                and len(item["source"]) <= 200
+                and len(item["preferred"]) <= 200
+                for item in items
+            ):
+                raise ValueError(f"Chapter Memory {field_name} phải gồm các cặp source/preferred.")
+            normalized[field_name] = [
+                {"source": item["source"].strip(), "preferred": item["preferred"].strip()}
+                for item in items if item["source"].strip()
+            ]
+        else:
+            if not all(isinstance(item, str) and len(item) <= 500 for item in items):
+                raise ValueError(f"Chapter Memory {field_name} phải là danh sách chuỗi hợp lệ.")
+            normalized[field_name] = [item.strip() for item in items if item.strip()]
+    return normalized
 
 
 @dataclass
@@ -28,6 +77,8 @@ class ChapterMemory:
     generated_at: str = ""
     source_hash: str = ""
     prompt_version: str = CHAPTER_MEMORY_VERSION
+    glossary_hash: str = ""
+    document_type: str = "GENERAL"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -95,35 +146,38 @@ class ChapterMemoryBuilder:
         glossary: Optional[Dict[str, str]] = None,
         provider: Optional[Any] = None,
         model_name: Optional[str] = None,
+        document_type: str = "GENERAL",
     ) -> ChapterMemory:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / f"chapter_context_{chapter_id}.json"
+        source_digest = cls.source_hash(nodes)
         glossary_signature = json.dumps(glossary or {}, ensure_ascii=False, sort_keys=True)
-        digest = hashlib.sha256((cls.source_hash(nodes) + glossary_signature).encode("utf-8")).hexdigest()
+        glossary_digest = hashlib.sha256(glossary_signature.encode("utf-8")).hexdigest()
+        normalized_document_type = (document_type or "GENERAL").upper()
         if cache_path.exists():
             try:
                 cached = ChapterMemory.from_dict(json.loads(cache_path.read_text(encoding="utf-8")))
-                if cached.source_hash == digest and cached.version == CHAPTER_MEMORY_VERSION:
+                if (
+                    cached.source_hash == source_digest
+                    and cached.glossary_hash == glossary_digest
+                    and cached.document_type == normalized_document_type
+                    and cached.version == CHAPTER_MEMORY_VERSION
+                    and cached.prompt_version == CHAPTER_MEMORY_PROMPT_VERSION
+                ):
                     return cached
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 pass
 
         sample = cls.stratified_sample(nodes)
-        summary = f"Chương '{chapter_title}' và các chủ đề liên quan."
+        summary = (sample[:600].strip() or f"Chương '{chapter_title}' chưa có nội dung tóm tắt.")
         structured: Dict[str, Any] = {}
         if provider and sample:
             try:
-                generated = provider.summarize_context(sample, model=model_name, max_input_chars=len(sample))
-                if generated:
-                    try:
-                        structured = json.loads(generated)
-                        if isinstance(structured, dict):
-                            summary = str(structured.get("summary") or summary)[:2400]
-                        else:
-                            structured = {}
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        structured = {}
-                        summary = generated[:2400]
+                generated = provider.build_chapter_memory(
+                    sample, chapter_title, normalized_document_type, model=model_name,
+                )
+                structured = validate_chapter_memory_response(generated)
+                summary = structured["summary"] or summary
             except Exception:
                 structured = {}
         memory = ChapterMemory(
@@ -136,7 +190,10 @@ class ChapterMemoryBuilder:
             important_facts=structured.get("important_facts") or [],
             style_notes=structured.get("style_notes") or [],
             generated_at=datetime.now(timezone.utc).isoformat(),
-            source_hash=digest,
+            source_hash=source_digest,
+            prompt_version=CHAPTER_MEMORY_PROMPT_VERSION,
+            glossary_hash=glossary_digest,
+            document_type=normalized_document_type,
         )
         cache_path.write_text(json.dumps(memory.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         return memory

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-DOCUMENT_PROFILE_VERSION = "document-profile-v2"
+DOCUMENT_PROFILE_VERSION = "document-profile-v3-source-only"
 
 
 @dataclass
@@ -31,6 +31,21 @@ class DocumentTranslationProfile:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def to_source_context(self) -> Dict[str, Any]:
+        return {
+            "document_type": self.document_type,
+            "source_domain": self.domain,
+            "source_audience": self.intended_audience,
+            "source_tone": self.tone,
+            "source_register": self.register,
+            "source_complexity": self.complexity,
+            "proper_noun_policy": self.proper_noun_policy,
+            "terminology_observations": self.terminology_notes,
+            "style_observations": self.style_notes,
+            "source_summary": self.summary,
+            "version": self.version,
+        }
 
     @classmethod
     def from_dict(cls, value: Dict[str, Any]) -> "DocumentTranslationProfile":
@@ -79,7 +94,6 @@ class DocumentProfiler:
         audience, tone, register = defaults.get(domain, ("general readers", "clear, neutral", "accessible"))
         sentence_count = max(1, len(re.findall(r"[.!?]+", sample)))
         complexity = "high" if len(sample.split()) / sentence_count > 28 else "medium"
-        notes = [custom_instructions.strip()] if custom_instructions and custom_instructions.strip() else []
         return DocumentTranslationProfile(
             document_type=domain,
             domain=domain.lower().replace("_", " "),
@@ -87,13 +101,9 @@ class DocumentProfiler:
             tone=tone,
             register=register,
             complexity=complexity,
-            translation_preferences={
-                "prefer_short_sentences": domain in {"GENERAL", "SELF_HELP", "BUSINESS"},
-                "preserve_examples": True,
-                "sentence_restructuring": "conservative" if domain in {"LEGAL", "TECHNICAL", "ACADEMIC"} else "moderate",
-            },
+            translation_preferences={},
             proper_noun_policy={"preserve_names_products_acronyms": True, "translate_only_when_established": True},
-            style_notes=notes,
+            style_notes=[],
             summary="Tài liệu thuộc lĩnh vực " + domain.lower().replace("_", " ") + ".",
         )
 
@@ -111,7 +121,7 @@ class DocumentProfiler:
         cache_path = cache_dir / "document_profile.json"
         digest = cls.source_hash(nodes)
         setup_hash = hashlib.sha256(
-            f"{(document_type or 'GENERAL').upper()}\n{custom_instructions.strip()}\n{DOCUMENT_PROFILE_VERSION}".encode("utf-8")
+            f"{(document_type or 'GENERAL').upper()}\n{DOCUMENT_PROFILE_VERSION}".encode("utf-8")
         ).hexdigest()
         if cache_path.exists():
             try:
@@ -122,7 +132,7 @@ class DocumentProfiler:
                 pass
 
         sample = cls.stratified_sample(nodes)
-        profile = cls.fallback_profile(document_type, sample, custom_instructions)
+        profile = cls.fallback_profile(document_type, sample)
         if provider and sample:
             try:
                 try:

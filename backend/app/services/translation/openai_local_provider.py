@@ -172,6 +172,54 @@ class OpenAILocalProvider(TranslationProvider):
     def summarize_context(self, text_sample: str, model: Optional[str] = None, max_input_chars: Optional[int] = 4000) -> str:
         return ""
 
+    def build_chapter_memory(
+        self,
+        text_sample: str,
+        chapter_title: str,
+        document_type: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_model = model or self.default_model
+        schema = {
+            "summary": "...", "entities": [{"source": "...", "preferred": "..."}],
+            "key_concepts": [], "tone": "...", "pronoun_notes": [],
+            "terminology": [{"source": "...", "preferred": "..."}],
+            "important_facts": [], "style_notes": [],
+        }
+        payload = {
+            "model": target_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Build structured source chapter memory. Return JSON only, without markdown or extra prose. "
+                        "Follow this exact schema: " + json.dumps(schema, ensure_ascii=False)
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"CHAPTER TITLE: {chapter_title}\nDOCUMENT TYPE: {document_type}\n"
+                        f"SOURCE SAMPLE:\n{text_sample[:5500]}"
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            response = self.session.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(), json=payload, timeout=60.0,
+            )
+            if response.status_code == 200:
+                content = response.json()["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        return {}
+
     def extract_glossary(self, text_sample: str, document_type: str = "GENERAL", model: Optional[str] = None) -> List[Dict[str, str]]:
         return []
 

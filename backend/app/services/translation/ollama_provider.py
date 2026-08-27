@@ -244,6 +244,50 @@ class OllamaProvider(TranslationProvider):
             pass
         return ""
 
+    def build_chapter_memory(
+        self,
+        text_sample: str,
+        chapter_title: str,
+        document_type: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_model = model or self.default_model
+        schema = {
+            "summary": "...", "entities": [{"source": "...", "preferred": "..."}],
+            "key_concepts": [], "tone": "...", "pronoun_notes": [],
+            "terminology": [{"source": "...", "preferred": "..."}],
+            "important_facts": [], "style_notes": [],
+        }
+        system_message = (
+            "Build structured source chapter memory for an English-to-Vietnamese translation engine. "
+            "Return JSON only, without markdown or prose outside JSON. Follow this exact schema: "
+            + json.dumps(schema, ensure_ascii=False)
+        )
+        user_message = (
+            f"CHAPTER TITLE: {chapter_title}\nDOCUMENT TYPE: {document_type}\n"
+            f"SOURCE SAMPLE:\n{text_sample[:5500]}"
+        )
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "format": "json",
+            "stream": False,
+            "keep_alive": "60m",
+            "options": {"temperature": 0.1},
+        }
+        try:
+            response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
+            if response.status_code == 200:
+                content = response.json().get("message", {}).get("content", "")
+                parsed = json.loads(content)
+                return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        return {}
+
     def extract_glossary(
         self,
         text_sample: str,

@@ -5,15 +5,11 @@ from typing import Dict, List
 from app.services.translation.glossary_validator import GlossaryValidator
 from app.services.translation.language_validator import validate_target_language
 from app.services.translation.numeric_validator import NumericValidator
+from app.services.translation.polarity_validator import PolarityValidator
+from app.services.translation.reference_validator import ReferenceValidator
 
 
 URL_PATTERN = re.compile(r"https?://[^\s)\]}]+|www\.[^\s)\]}]+", re.IGNORECASE)
-REFERENCE_PATTERN = re.compile(
-    r"\b(?:Figure|Fig\.?|Table|Chapter|Section)\s+\d+(?:\.\d+)*\b",
-    re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class QualityGateResult:
     passed: bool
@@ -55,11 +51,10 @@ class TranslationQualityGate:
             if missing_urls:
                 issues.append(self._issue("URL_MISMATCH", "ERROR", f"Thiếu URL từ nguồn: {', '.join(missing_urls)}"))
 
-            source_refs = set(REFERENCE_PATTERN.findall(source))
-            target_ref_numbers = {re.search(r"\d+(?:\.\d+)*", ref).group(0) for ref in REFERENCE_PATTERN.findall(target)}
-            missing_refs = [ref for ref in source_refs if re.search(r"\d+(?:\.\d+)*", ref).group(0) not in target_ref_numbers]
-            if missing_refs:
-                issues.append(self._issue("REFERENCE_MISMATCH", "ERROR", f"Thiếu tham chiếu: {', '.join(missing_refs)}"))
+            references = ReferenceValidator.validate(source, target)
+            if not references.passed:
+                missing_refs = ", ".join(token.raw for token in references.missing)
+                issues.append(self._issue("REFERENCE_MISMATCH", "ERROR", f"Thiếu hoặc sai tham chiếu: {missing_refs}"))
 
             if len(source) > 100:
                 ratio = len(target) / max(len(source), 1)
@@ -74,11 +69,10 @@ class TranslationQualityGate:
                     f"Thuật ngữ khóa '{violation.source_term}' phải dùng '{violation.expected_target}'.",
                 ))
 
-            source_lower = source.lower()
-            target_lower = target.lower()
-            source_has_negation = bool(re.search(r"\b(?:not|never|no longer|without|cannot|can't|must not)\b", source_lower))
-            target_has_negation = bool(re.search(r"\b(?:không|chưa|chẳng|không còn|không được|thiếu)\b", target_lower))
-            if source_has_negation and not target_has_negation:
+            polarity = PolarityValidator.validate(source, target)
+            if polarity.explicit_negation_lost:
+                issues.append(self._issue("NEGATION_LOSS", "ERROR", "Bản dịch đã làm mất phủ định tường minh của nguồn."))
+            elif polarity.ambiguous_negation_risk:
                 issues.append(self._issue("NEGATION_RISK", "WARNING", "Bản dịch có nguy cơ làm mất ý phủ định."))
 
         hard_fail = any(issue["severity"] == "ERROR" for issue in issues)

@@ -76,6 +76,17 @@ class TranslationProvider(ABC):
         pass
 
     @abstractmethod
+    def build_chapter_memory(
+        self,
+        text_sample: str,
+        chapter_title: str,
+        document_type: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Tạo Chapter Memory theo contract JSON có cấu trúc."""
+        pass
+
+    @abstractmethod
     def extract_glossary(
         self,
         text_sample: str,

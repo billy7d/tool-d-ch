@@ -8,6 +8,8 @@ from app.models.schemas import QAIssueResponse, QAIssueUpdate, ConsistencyScanRe
 from app.services.qa.deterministic_qa import DeterministicQA
 from app.services.qa.ai_qa import AIQAEngine
 from app.services.qa.consistency_scanner import ConsistencyScanner
+from app.services.qa.issue_policy import evaluate_issue_resolution
+from app.services.qa.result_validator import qa_error, validate_qa_result
 from app.services.translation.worker import translation_worker
 from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.glossary_service import GlossaryService
@@ -238,7 +240,52 @@ def retranslate_all_qa_issues(
                 result = engine.repair_node(chapter, engine.canonical_node(node), node_issues)
                 probe = NodeModel(content=node.content, translated_content=result.translated_text)
                 deterministic_issues = DeterministicQA.audit_node(probe)
-                if not result.passed or deterministic_issues:
+                if not result.passed:
+                    node.status = "NEEDS_REVIEW"
+                    db.commit()
+                    continue
+                node_open_issues = [issue for issue in issues if issue.node_id == nid]
+                remaining_codes = [issue["code"] for issue in result.quality.issues]
+                remaining_codes.extend(issue["issue_type"] for issue in deterministic_issues)
+                preliminary = evaluate_issue_resolution(
+                    [issue.issue_type for issue in node_open_issues],
+                    remaining_codes,
+                )
+                semantic_review = None
+                if preliminary.semantic_review_required and not deterministic_issues:
+                    try:
+                        semantic_review = validate_qa_result(provider.review_translation(
+                            source_text=node.content,
+                            translated_text=result.translated_text,
+                            glossary_terms=locked_glossary,
+                            model=config.model_name,
+                        ))
+                    except Exception as exc:
+                        semantic_review = qa_error(f"Semantic re-review thất bại: {exc}")
+                elif preliminary.semantic_review_required:
+                    semantic_review = {
+                        "status": "FAIL", "is_passed": False, "score": 0.0,
+                        "issues": ["Candidate repair chưa pass deterministic QA."],
+                    }
+                resolution = evaluate_issue_resolution(
+                    [issue.issue_type for issue in node_open_issues],
+                    remaining_codes,
+                    semantic_review,
+                )
+                for issue in node_open_issues:
+                    issue.status = resolution.statuses.get(issue.issue_type.upper(), "OPEN")
+                if resolution.qa_error:
+                    qa_repo.add_issue(
+                        project_id=project_id,
+                        node_id=nid,
+                        issue_type="QA_ERROR",
+                        severity="ERROR",
+                        message=resolution.qa_error,
+                        source_snippet=node.content[:150],
+                        translation_snippet=result.translated_text[:150],
+                        suggested_fix="Kiểm tra provider semantic QA rồi chạy lại repair.",
+                    )
+                if deterministic_issues or any(status == "OPEN" for status in resolution.statuses.values()):
                     node.status = "NEEDS_REVIEW"
                     db.commit()
                     continue
@@ -261,9 +308,6 @@ def retranslate_all_qa_issues(
                     prompt_version=signature.prompt_version,
                 )
                 fixed_count += 1
-                for issue in issues:
-                    if issue.node_id == nid:
-                        issue.status = "RESOLVED"
             except Exception as e_node:
                 print(f"[QA Bulk Fix] Error fixing node {nid}: {e_node}")
 

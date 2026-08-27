@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from app.services.translation.context_memory import BilingualContextItem, ChapterMemory
 from app.services.translation.document_profiler import DocumentTranslationProfile
 from app.services.translation.model_capabilities import ModelCapabilities
+from app.services.translation.term_matcher import TermMatcher
 
 
 def estimate_tokens(text: str) -> int:
@@ -36,6 +37,8 @@ class ContextTokenBudget:
     safety_margin_tokens: int
     total_estimated_tokens: int
     available_source_tokens: int
+    fits_context_window: bool
+    fits_source_budget: bool
     fits: bool
 
     @property
@@ -63,9 +66,14 @@ class ContextTokenBudget:
         return self.system_tokens + self.context_tokens + self.source_tokens + self.contract_tokens
 
     def assert_within_budget(self) -> None:
-        if not self.fits:
+        if not self.fits_context_window:
             raise ContextBudgetExceeded(
                 f"Ngữ cảnh ước tính {self.total_estimated_tokens} token vượt giới hạn {self.model_context_limit}."
+            )
+        if not self.fits_source_budget:
+            raise ContextBudgetExceeded(
+                f"Nguồn ước tính {self.source_tokens} token vượt ngân sách nguồn "
+                f"{self.available_source_tokens}."
             )
 
 
@@ -97,11 +105,9 @@ class ContextAssembler:
 
     @staticmethod
     def filter_relevant_glossary(source_text: str, glossary: Dict[str, str]) -> Dict[str, str]:
-        import re
         relevant: Dict[str, str] = {}
         for source, target in (glossary or {}).items():
-            pattern = rf"(?i)(?<!\w){re.escape(source)}(?:s|es|ed|ing)?(?!\w)"
-            if re.search(pattern, source_text):
+            if TermMatcher.contains(source_text, source):
                 relevant[source] = target
         return relevant
 
@@ -132,17 +138,19 @@ class ContextAssembler:
 
     @staticmethod
     def _compact_document(profile: DocumentTranslationProfile, level: int) -> str:
+        source = profile.to_source_context()
         if level == 1:
             value = {
-                "document_type": profile.document_type, "domain": profile.domain,
-                "audience": profile.intended_audience, "tone": profile.tone,
-                "register": profile.register, "preferences": profile.translation_preferences,
-                "style_notes": profile.style_notes[:5], "summary": profile.summary[:900],
+                "document_type": source["document_type"], "source_domain": source["source_domain"],
+                "source_audience": source["source_audience"], "source_tone": source["source_tone"],
+                "source_register": source["source_register"],
+                "style_observations": source["style_observations"][:5],
+                "source_summary": source["source_summary"][:900],
             }
         else:
             value = {
-                "domain": profile.domain, "tone": profile.tone,
-                "register": profile.register, "summary": profile.summary[:400],
+                "source_domain": source["source_domain"], "source_tone": source["source_tone"],
+                "source_register": source["source_register"], "source_summary": source["source_summary"][:400],
             }
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -163,7 +171,7 @@ class ContextAssembler:
     ) -> TranslationContext:
         source_text = "\n".join(str(getattr(node, "content", "") or "") for node in nodes)
         source_payload = cls._source_payload(nodes, prompt_kind)
-        document_memory = json.dumps(document_profile.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        document_memory = json.dumps(document_profile.to_source_context(), ensure_ascii=False, separators=(",", ":"))
         chapter_text = json.dumps(chapter_memory.to_dict(), ensure_ascii=False, separators=(",", ":"))
         relevant_glossary = cls.filter_relevant_glossary(source_text, glossary)
         selected_shots = list(few_shots or [])
@@ -219,6 +227,8 @@ class ContextAssembler:
         non_source = values["system"] + context_tokens + values["contract"] + reserved_output + safety_margin
         available_source = min(model_capabilities.recommended_source_tokens, max(0, context_limit - non_source))
         total_estimated = non_source + source_tokens
+        fits_context_window = total_estimated <= context_limit
+        fits_source_budget = source_tokens <= available_source
         budget = ContextTokenBudget(
             model_context_limit=context_limit,
             system_tokens=values["system"],
@@ -234,7 +244,9 @@ class ContextAssembler:
             safety_margin_tokens=safety_margin,
             total_estimated_tokens=total_estimated,
             available_source_tokens=available_source,
-            fits=total_estimated <= context_limit,
+            fits_context_window=fits_context_window,
+            fits_source_budget=fits_source_budget,
+            fits=fits_context_window and fits_source_budget,
         )
         return TranslationContext(
             document_memory=document_memory,

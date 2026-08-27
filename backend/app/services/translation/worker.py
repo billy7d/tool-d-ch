@@ -17,6 +17,7 @@ from app.services.translation.contextual_engine import ContextualTranslationEngi
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import build_translation_signature_from_config
 from app.services.translation.node_policy import translatable_values
+from app.services.translation.quality_gate import TranslationQualityGate
 
 
 class TranslationWorker:
@@ -267,14 +268,18 @@ class TranslationWorker:
                         prompt_version=signature.prompt_version,
                     )
                     if tm_hit:
-                        trans_repo.save_node_translation(
-                            node_id=first_model.id,
-                            project_id=project_id,
-                            translated_text=tm_hit,
-                            model_name=f"TM ({config.model_name})",
-                            prompt_version=signature.prompt_version,
+                        tm_quality = TranslationQualityGate().validate(
+                            first_model.content, tm_hit, locked_glossary,
                         )
-                        continue
+                        if tm_quality.passed:
+                            trans_repo.save_node_translation(
+                                node_id=first_model.id,
+                                project_id=project_id,
+                                translated_text=tm_hit,
+                                model_name=f"TM ({config.model_name})",
+                                prompt_version=signature.prompt_version,
+                            )
+                            continue
 
                     canonical_nodes = [engine.canonical_node(node) for node in pending_models]
                     chunk = engine.pack_next_chunk(chapter, canonical_nodes)

@@ -159,6 +159,7 @@ class ContextualTranslationEngine:
                 self.locked_glossary,
                 self.provider,
                 self.config.model_name,
+                self.config.document_type,
             )
         return self._chapter_memories[chapter.id]
 
@@ -251,7 +252,10 @@ class ContextualTranslationEngine:
     def pack_next_chunk(self, chapter: ChapterModel, nodes: List[DocumentNode]) -> Optional[SemanticChunk]:
         current: List[DocumentNode] = []
         for node in nodes:
-            if current and node.type.value in {"heading", "table", "footnote"}:
+            if current and (
+                current[0].type.value in {"table", "footnote"}
+                or node.type.value in {"heading", "table", "footnote"}
+            ):
                 break
             candidate = current + [node]
             context = self.assemble_context(chapter, candidate, "batch")

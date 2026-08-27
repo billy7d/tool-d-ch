@@ -2,7 +2,7 @@ from app.db.engine import get_project_db
 from app.db.models import NodeModel, ProjectModel
 from app.db.repository import ProjectRepository
 from app.models.canonical import DocumentNode, NodeStatus, NodeType
-from app.services.translation.context_assembler import ContextAssembler
+from app.services.translation.context_assembler import ContextAssembler, ContextBudgetExceeded
 from app.services.translation.context_memory import BilingualContextItem, ChapterMemory
 from app.services.translation.document_profiler import DocumentProfiler
 from app.services.translation.language_validator import validate_target_language
@@ -71,6 +71,29 @@ def test_hard_budget_trims_optional_context_and_preserves_source():
     assert context.trim_steps
 
 
+def test_source_budget_is_hard_even_when_request_fits_context_window():
+    node = _node(1, "source " * 450)
+    profile = DocumentProfiler.fallback_profile("GENERAL", node.content)
+    context = ContextAssembler.assemble_context(
+        [node], profile, ChapterMemory(), [], {},
+        ModelCapabilities(4096, 4096, 120, True, True), [],
+        system_prompt="Dịch chính xác sang tiếng Việt.",
+        output_contract=PromptBuilder.BATCH_OUTPUT_CONTRACT,
+    )
+
+    assert context.token_budget.fits_context_window
+    assert not context.token_budget.fits_source_budget
+    assert not context.token_budget.fits
+    assert context.token_budget.source_tokens > context.token_budget.available_source_tokens
+
+    try:
+        context.assert_within_budget()
+    except ContextBudgetExceeded as exc:
+        assert "vượt ngân sách nguồn" in str(exc)
+    else:
+        raise AssertionError("Source vượt ngân sách phải bị từ chối")
+
+
 def test_full_glossary_validation_remains_after_inference_filtering():
     glossary = {f"term{i}": f"thuật ngữ {i}" for i in range(500)}
     glossary.update({"alpha": "an-pha", "beta": "bê-ta"})
@@ -103,7 +126,8 @@ def test_numeric_language_and_negation_hardening():
     assert not negative.passed
     assert not decimal.passed
     assert leakage.reason == "WRONG_TARGET_LANGUAGE"
-    assert any(issue["code"] == "NEGATION_RISK" and issue["severity"] == "WARNING" for issue in negation.issues)
+    assert any(issue["code"] == "NEGATION_LOSS" and issue["severity"] == "ERROR" for issue in negation.issues)
+    assert not negation.passed
 
 
 def test_non_translatable_progress_and_review_terminal_accounting():

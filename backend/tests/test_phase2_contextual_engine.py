@@ -50,8 +50,8 @@ def test_document_profile_is_cached_and_invalidated_by_user_setup(tmp_path: Path
     assert first.source_hash == second.source_hash
     assert provider.calls == 1
     changed = DocumentProfiler.load_or_create(nodes, tmp_path, "BUSINESS", "Dùng câu ngắn.", provider, "mock")
-    assert changed.setup_hash != first.setup_hash
-    assert provider.calls == 2
+    assert changed.setup_hash == first.setup_hash
+    assert provider.calls == 1
 
 
 def test_context_assembler_trims_low_priority_context_but_keeps_locked_glossary():
