@@ -19,7 +19,7 @@ def _safe_rate(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4) if denominator else 0.0
 
 
-def run(model: str = "mock") -> dict:
+def run(model: str = "mock", write_artifacts: bool = True) -> dict:
     samples = [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line.strip()]
     provider = MockProvider() if model.lower().startswith("mock") else OllamaProvider(default_model=model)
     if not provider.health_check():
@@ -93,14 +93,15 @@ def run(model: str = "mock") -> dict:
         "risk_distribution": {**levels, "critic_required": initial_critic_calls},
         "model": model,
     }
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    (ARTIFACTS / "phase3_semantic_benchmark.json").write_text(
-        json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8",
-    )
-    with (ARTIFACTS / "phase3_human_eval.csv").open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+    if write_artifacts:
+        ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        (ARTIFACTS / "phase3_semantic_benchmark.json").write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        with (ARTIFACTS / "phase3_human_eval.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
     return metrics
 
 
