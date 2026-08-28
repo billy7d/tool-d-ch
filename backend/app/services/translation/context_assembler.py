@@ -83,6 +83,7 @@ class TranslationContext:
     chapter_memory: str = ""
     previous_context: List[BilingualContextItem] = field(default_factory=list)
     glossary: Dict[str, str] = field(default_factory=dict)
+    entity_decisions: Dict[str, str] = field(default_factory=dict)
     few_shots: List[dict] = field(default_factory=list)
     token_budget: Optional[ContextTokenBudget] = None
     system_prompt: str = ""
@@ -168,12 +169,14 @@ class ContextAssembler:
         output_contract: str = "",
         prompt_kind: str = "batch",
         compact_system_prompt: Optional[str] = None,
+        entity_decisions: Optional[Dict[str, str]] = None,
     ) -> TranslationContext:
         source_text = "\n".join(str(getattr(node, "content", "") or "") for node in nodes)
         source_payload = cls._source_payload(nodes, prompt_kind)
         document_memory = json.dumps(document_profile.to_source_context(), ensure_ascii=False, separators=(",", ":"))
         chapter_text = json.dumps(chapter_memory.to_dict(), ensure_ascii=False, separators=(",", ":"))
         relevant_glossary = cls.filter_relevant_glossary(source_text, glossary)
+        relevant_entities = cls.filter_relevant_glossary(source_text, entity_decisions or {})
         selected_shots = list(few_shots or [])
         previous = list(rolling_context)
         selected_system = system_prompt
@@ -190,6 +193,7 @@ class ContextAssembler:
                 "chapter": estimate_tokens(chapter_text),
                 "rolling": estimate_tokens(json.dumps([item.__dict__ for item in previous], ensure_ascii=False)),
                 "glossary": estimate_tokens(json.dumps(relevant_glossary, ensure_ascii=False)),
+                "entities": estimate_tokens(json.dumps(relevant_entities, ensure_ascii=False)),
                 "few_shot": estimate_tokens(json.dumps(selected_shots, ensure_ascii=False)),
                 "contract": estimate_tokens(output_contract) + cls.CONTEXT_LABEL_OVERHEAD,
             }
@@ -223,7 +227,7 @@ class ContextAssembler:
             trim_steps.append("optional_style_notes")
 
         values = components()
-        context_tokens = values["document"] + values["chapter"] + values["rolling"] + values["glossary"] + values["few_shot"]
+        context_tokens = values["document"] + values["chapter"] + values["rolling"] + values["glossary"] + values["entities"] + values["few_shot"]
         non_source = values["system"] + context_tokens + values["contract"] + reserved_output + safety_margin
         available_source = min(model_capabilities.recommended_source_tokens, max(0, context_limit - non_source))
         total_estimated = non_source + source_tokens
@@ -253,6 +257,7 @@ class ContextAssembler:
             chapter_memory=chapter_text,
             previous_context=previous,
             glossary=relevant_glossary,
+            entity_decisions=relevant_entities,
             few_shots=selected_shots,
             token_budget=budget,
             system_prompt=selected_system,

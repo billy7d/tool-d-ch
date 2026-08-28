@@ -2,11 +2,12 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Response
 from typing import List
 
 from app.db.engine import get_project_db
-from app.db.models import NodeModel
+from app.db.models import GlossaryModel, NodeModel
 from app.db.repository import GlossaryRepository
 from app.models.schemas import GlossaryItemCreate, GlossaryItemUpdate, GlossaryItemResponse
 from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.worker import translation_worker
+from app.services.translation.semantic_assurance import SemanticAssuranceService
 
 router = APIRouter(prefix="/api/projects/{project_id}/glossary", tags=["Glossary"])
 
@@ -45,6 +46,8 @@ def add_glossary_term(project_id: str, payload: GlossaryItemCreate):
             notes=payload.notes,
             locked=payload.locked
         )
+        SemanticAssuranceService.invalidate_for_source_term(db, project_id, item.source_term)
+        db.commit()
         return GlossaryItemResponse(
             id=item.id,
             source_term=item.source_term,
@@ -63,9 +66,15 @@ def update_glossary_term(project_id: str, term_id: str, payload: GlossaryItemUpd
     db = get_project_db(project_id)
     repo = GlossaryRepository(db)
     try:
+        previous = db.query(GlossaryModel).filter(GlossaryModel.id == term_id).first()
+        previous_source = previous.source_term if previous else ""
         item = repo.update_term(term_id, **payload.model_dump(exclude_unset=True))
         if not item:
             raise HTTPException(status_code=404, detail="Không tìm thấy thuật ngữ.")
+        if previous_source:
+            SemanticAssuranceService.invalidate_for_source_term(db, project_id, previous_source)
+        SemanticAssuranceService.invalidate_for_source_term(db, project_id, item.source_term)
+        db.commit()
         return GlossaryItemResponse(
             id=item.id,
             source_term=item.source_term,
@@ -84,9 +93,14 @@ def delete_glossary_term(project_id: str, term_id: str):
     db = get_project_db(project_id)
     repo = GlossaryRepository(db)
     try:
+        previous = db.query(GlossaryModel).filter(GlossaryModel.id == term_id).first()
+        previous_source = previous.source_term if previous else ""
         success = repo.delete_term(term_id)
         if not success:
             raise HTTPException(status_code=404, detail="Không tìm thấy thuật ngữ.")
+        if previous_source:
+            SemanticAssuranceService.invalidate_for_source_term(db, project_id, previous_source)
+            db.commit()
         return {"message": "Đã xóa thuật ngữ."}
     finally:
         db.close()
@@ -115,7 +129,10 @@ def auto_extract_glossary(project_id: str):
                     notes=term.get("notes"),
                     locked=True
                 )
+                SemanticAssuranceService.invalidate_for_source_term(db, project_id, src)
                 added_count += 1
+
+        db.commit()
 
         return {"message": f"Đã tự động trích xuất và thêm {added_count} thuật ngữ vào bảng tra cứu.", "count": added_count}
     finally:
@@ -143,6 +160,10 @@ async def import_glossary_csv(project_id: str, file: UploadFile = File(...)):
     db = get_project_db(project_id)
     try:
         count = GlossaryService.import_csv(db, project_id, csv_str)
+        # Import có thể thay đổi nhiều term; đánh stale toàn bộ review của project.
+        node_ids = [node.id for node in db.query(NodeModel).filter(NodeModel.project_id == project_id).all()]
+        SemanticAssuranceService.invalidate_for_nodes(db, project_id, node_ids)
+        db.commit()
         return {"message": f"Đã nhập thành công {count} thuật ngữ.", "count": count}
     finally:
         db.close()

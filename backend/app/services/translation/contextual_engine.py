@@ -6,12 +6,13 @@ from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import ChapterModel, NodeModel
+from app.db.models import ChapterModel, EntityDecisionModel, NodeModel
 from app.models.canonical import DocumentNode, NodeStatus
 from app.services.translation.adaptive_chunker import AdaptiveSemanticChunker, SemanticChunk, TextSegment
 from app.services.translation.context_assembler import ContextAssembler, TranslationContext, estimate_tokens
 from app.services.translation.context_memory import ChapterMemory, ChapterMemoryBuilder, RollingContextService
 from app.services.translation.document_profiler import DocumentProfiler, DocumentTranslationProfile
+from app.services.translation.entity_ledger import EntityLedgerService
 from app.services.translation.json_parser import validate_translation_batch
 from app.services.translation.node_policy import normalize_node_type
 from app.services.translation.prompt_builder import PromptBuilder
@@ -76,6 +77,11 @@ class ContextualTranslationEngine:
         self.provider = provider
         self.config = config
         self.locked_glossary = dict(locked_glossary or {})
+        self.entity_decisions = {
+            item.source_key: item.preferred_translation
+            for item in self.db.query(EntityDecisionModel).filter_by(project_id=self.project_id).all()
+            if item.source_key.casefold() not in {key.casefold() for key in self.locked_glossary}
+        }
         self.event_callback = event_callback
         self.capabilities = provider.get_model_capabilities(config.model_name)
         self.effective_context_window = min(
@@ -206,6 +212,7 @@ class ContextualTranslationEngine:
             output_contract=contract,
             prompt_kind=prompt_kind,
             compact_system_prompt=self.compact_system_prompt,
+            entity_decisions=self.entity_decisions,
         )
         if context.trim_steps:
             self._emit("TRANSLATION_CONTEXT_TRIMMED", {

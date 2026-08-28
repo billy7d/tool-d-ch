@@ -16,6 +16,10 @@ class TranslationConfig:
     custom_instructions: str
     style_guide: Dict[str, Any] = field(default_factory=dict)
     quality_profile: str = "BALANCED"
+    semantic_risk_medium: float = 0.35
+    semantic_risk_high: float = 0.65
+    semantic_max_repairs: int = 2
+    semantic_critic_model: Optional[str] = None
 
     @classmethod
     def from_project(
@@ -58,6 +62,10 @@ class TranslationConfig:
             custom_instructions=str(custom_value or "").strip(),
             style_guide=normalized_style,
             quality_profile=str(getattr(project, "qa_level", None) or "BALANCED").upper(),
+            semantic_risk_medium=float(style_guide.get("semantic_risk_medium", 0.35)),
+            semantic_risk_high=float(style_guide.get("semantic_risk_high", 0.65)),
+            semantic_max_repairs=max(0, min(2, int(style_guide.get("semantic_max_repairs", 2)))),
+            semantic_critic_model=str(style_guide.get("semantic_critic_model") or model_override or getattr(project, "selected_model", None) or "qwen2.5:7b"),
         )
 
     def signature_payload(self) -> Dict[str, Any]:
@@ -72,4 +80,8 @@ class TranslationConfig:
             "custom_instructions": self.custom_instructions,
             "style_guide": self.style_guide,
             "quality_profile": self.quality_profile,
+            "semantic_risk_medium": self.semantic_risk_medium,
+            "semantic_risk_high": self.semantic_risk_high,
+            "semantic_max_repairs": self.semantic_max_repairs,
+            "semantic_critic_model": self.semantic_critic_model,
         }

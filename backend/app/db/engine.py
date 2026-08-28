@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session
 from app.config import settings
 from app.db.models import Base
+from sqlalchemy import text
 
 # Global database for system settings and project index
 GLOBAL_DB_PATH = settings.DATA_DIR / "global.db"
@@ -67,10 +68,24 @@ def get_project_engine(project_id: str):
             cursor.close()
             
         Base.metadata.create_all(bind=engine)
+        _apply_additive_project_migrations(engine)
         _project_engines[project_id] = engine
         _project_sessions[project_id] = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         
     return _project_engines[project_id]
+
+
+def _apply_additive_project_migrations(engine) -> None:
+    """Bổ sung cột Phase 3 cho DB đã tạo mà không xóa hay ghi đè dữ liệu."""
+    with engine.begin() as connection:
+        tables = {row[0] for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+        if "semantic_reviews" in tables:
+            columns = {row[1] for row in connection.execute(text("PRAGMA table_info(semantic_reviews)"))}
+            if "is_stale" not in columns:
+                connection.execute(text("ALTER TABLE semantic_reviews ADD COLUMN is_stale BOOLEAN NOT NULL DEFAULT 0"))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_semantic_reviews_is_stale ON semantic_reviews (is_stale)"
+            ))
 
 
 def get_project_db(project_id: str) -> Session:

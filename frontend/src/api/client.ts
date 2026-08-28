@@ -7,6 +7,9 @@ import {
   LayoutProfile,
   HardwareInfo,
   TranslationPreviewResponse,
+  SemanticSummary,
+  SemanticReview,
+  EntityDecision,
 } from '../types';
 
 const api = axios.create({
@@ -90,6 +93,20 @@ export const apiClient = {
     api.post(`/projects/${projectId}/qa/find_replace`, null, { params: { find_text, replace_text, apply_changes } }).then((r) => r.data),
   retranslateAllQAIssues: (projectId: string, instruction?: string, customModel?: string) =>
     api.post(`/projects/${projectId}/qa/retranslate_all_issues`, { instruction, custom_model: customModel }).then((r) => r.data),
+  getSemanticSummary: (projectId: string) =>
+    api.get<SemanticSummary>(`/projects/${projectId}/qa/semantic-summary`).then((r) => r.data),
+  getSemanticReviews: (projectId: string) =>
+    api.get<SemanticReview[]>(`/projects/${projectId}/qa/semantic-reviews`).then((r) => r.data),
+  runSemanticReview: (projectId: string) =>
+    api.post(`/projects/${projectId}/qa/run-semantic-review`).then((r) => r.data),
+  repairSemanticNode: (projectId: string, nodeId: string) =>
+    api.post(`/projects/${projectId}/qa/repair-semantic/${nodeId}`).then((r) => r.data),
+  runGlobalConsistency: (projectId: string) =>
+    api.post(`/projects/${projectId}/qa/global-consistency`).then((r) => r.data),
+  getEntities: (projectId: string) =>
+    api.get<EntityDecision[]>(`/projects/${projectId}/entities`).then((r) => r.data),
+  updateEntity: (projectId: string, entityId: string, data: Partial<EntityDecision>) =>
+    api.patch(`/projects/${projectId}/entities/${entityId}`, data).then((r) => r.data),
 
   // Layout & Preview
   getLayoutProfiles: (projectId: string) =>

@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any, Optional
 
 from app.db.engine import get_project_db
-from app.db.models import NodeModel, ChapterModel, QAIssueModel, GlossaryModel
-from app.db.repository import QARepository, ProjectRepository, TranslationRepository
+from app.db.models import NodeModel, ChapterModel, QAIssueModel, GlossaryModel, SemanticReviewModel
+from app.db.repository import QARepository, ProjectRepository
 from app.models.schemas import QAIssueResponse, QAIssueUpdate, ConsistencyScanResponse, RetranslateNodeRequest
 from app.services.qa.deterministic_qa import DeterministicQA
 from app.services.qa.ai_qa import AIQAEngine
@@ -17,8 +17,172 @@ from app.services.translation.translation_memory import TranslationMemoryService
 from app.services.translation.contextual_engine import ContextualTranslationEngine
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import build_translation_signature_from_config
+from app.services.translation.semantic_assurance import SemanticAssuranceService
+from app.services.qa.global_consistency import GlobalConsistencyScanner
+from app.services.translation.entity_ledger import EntityLedgerService
 
 router = APIRouter(prefix="/api/projects/{project_id}/qa", tags=["QA"])
+
+
+def _semantic_engine(db, project_id: str):
+    project = ProjectRepository(db).get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Không tìm thấy dự án.")
+    config = TranslationConfig.from_project(project)
+    provider = translation_worker.get_provider(config.model_name)
+    glossary = GlossaryService.get_locked_glossary_map(db, project_id)
+    return project, config, ContextualTranslationEngine(db, project, provider, config, glossary)
+
+
+def _review_existing_node(db, project_id: str, engine, node: NodeModel):
+    if not node.translated_content:
+        raise HTTPException(status_code=422, detail="Node chưa có bản dịch.")
+    chapter = db.query(ChapterModel).filter(ChapterModel.id == node.chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=422, detail="Node không thuộc chương hợp lệ.")
+    entities = EntityLedgerService.relevant_decisions(
+        db, project_id, node.content, engine.locked_glossary,
+    )
+    result = SemanticAssuranceService.evaluate_candidate(
+        engine, chapter, engine.canonical_node(node), node.translated_content, entities,
+        max_repairs=0,
+    )
+    SemanticAssuranceService.persist_existing_review(
+        db, project_id, node, result, engine.config.semantic_critic_model or engine.config.model_name,
+    )
+    return result
+
+
+@router.get("/semantic-summary")
+def semantic_summary(project_id: str):
+    db = get_project_db(project_id)
+    try:
+        nodes_total = db.query(NodeModel).filter(
+            NodeModel.project_id == project_id, NodeModel.translated_content.isnot(None),
+        ).count()
+        rows = db.query(SemanticReviewModel).filter(
+            SemanticReviewModel.project_id == project_id,
+            SemanticReviewModel.is_stale.is_(False),
+        ).order_by(SemanticReviewModel.created_at).all()
+        latest = {row.node_id: row for row in rows}
+        values = list(latest.values())
+        return {
+            "nodes_total": nodes_total,
+            "risk_low": sum(row.risk_level == "LOW" for row in values),
+            "risk_medium": sum(row.risk_level == "MEDIUM" for row in values),
+            "risk_high": sum(row.risk_level == "HIGH" for row in values),
+            "critic_reviewed": sum(row.critic_status != "NOT_REQUIRED" for row in values),
+            "semantic_pass": sum(row.critic_status in {"PASS", "NOT_REQUIRED"} for row in values),
+            "semantic_failed": sum(row.critic_status == "FAIL" for row in values),
+            "semantic_error": sum(row.critic_status == "ERROR" for row in values),
+            "needs_review": db.query(NodeModel).filter(NodeModel.project_id == project_id, NodeModel.status == "NEEDS_REVIEW").count(),
+        }
+    finally:
+        db.close()
+
+
+@router.get("/semantic-reviews")
+def semantic_reviews(project_id: str):
+    db = get_project_db(project_id)
+    try:
+        rows = db.query(SemanticReviewModel).filter(
+            SemanticReviewModel.project_id == project_id,
+            SemanticReviewModel.is_stale.is_(False),
+        ).order_by(SemanticReviewModel.created_at.desc()).all()
+        nodes = {node.id: node for node in db.query(NodeModel).filter(NodeModel.project_id == project_id).all()}
+        return [{
+            "id": row.id, "node_id": row.node_id, "translation_version": row.translation_version,
+            "risk_score": row.risk_score, "risk_level": row.risk_level,
+            "critic_status": row.critic_status, "critic_score": row.critic_score,
+            "issues": row.issues_json or [], "model_name": row.model_name,
+            "prompt_version": row.prompt_version, "critic_latency_ms": row.critic_latency_ms,
+            "critic_request_tokens": row.critic_request_tokens,
+            "node_status": nodes.get(row.node_id).status if nodes.get(row.node_id) else "",
+            "source_excerpt": (nodes.get(row.node_id).content if nodes.get(row.node_id) else "")[:240],
+            "translation_excerpt": (nodes.get(row.node_id).translated_content if nodes.get(row.node_id) else "")[:240],
+        } for row in rows]
+    finally:
+        db.close()
+
+
+@router.post("/run-semantic-review")
+def run_semantic_review(project_id: str):
+    db = get_project_db(project_id)
+    try:
+        _, _, engine = _semantic_engine(db, project_id)
+        nodes = db.query(NodeModel).filter(
+            NodeModel.project_id == project_id, NodeModel.translated_content.isnot(None),
+        ).all()
+        results = [_review_existing_node(db, project_id, engine, node) for node in nodes]
+        return {
+            "reviewed": len(results),
+            "critic_calls": sum(item.critic_calls for item in results),
+            "failed": sum(not item.approved for item in results),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/review-node/{node_id}")
+def review_semantic_node(project_id: str, node_id: str):
+    db = get_project_db(project_id)
+    try:
+        _, _, engine = _semantic_engine(db, project_id)
+        node = db.query(NodeModel).filter(NodeModel.project_id == project_id, NodeModel.id == node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Không tìm thấy node.")
+        result = _review_existing_node(db, project_id, engine, node)
+        return result.__dict__
+    finally:
+        db.close()
+
+
+@router.post("/repair-semantic/{node_id}")
+def repair_semantic_node(project_id: str, node_id: str):
+    db = get_project_db(project_id)
+    try:
+        _, config, engine = _semantic_engine(db, project_id)
+        node = db.query(NodeModel).filter(NodeModel.project_id == project_id, NodeModel.id == node_id).first()
+        if not node:
+            raise HTTPException(status_code=404, detail="Không tìm thấy node.")
+        chapter = db.query(ChapterModel).filter(ChapterModel.id == node.chapter_id).first()
+        review = db.query(SemanticReviewModel).filter(
+            SemanticReviewModel.project_id == project_id, SemanticReviewModel.node_id == node_id,
+        ).order_by(SemanticReviewModel.created_at.desc()).first()
+        errors = list(review.issues_json or []) if review else []
+        repaired = engine.repair_node(
+            chapter, engine.canonical_node(node),
+            [{"code": item.get("type", "MEANING_DRIFT"), "message": item.get("message", "Sửa lỗi semantic.")} for item in errors],
+            max_attempts=1,
+        )
+        if not repaired.passed:
+            raise HTTPException(status_code=422, detail={"code": "DETERMINISTIC_REPAIR_FAILED", "issues": repaired.quality.issues})
+        signature = build_translation_signature_from_config(config, engine.locked_glossary)
+        resolved_ids = [issue.id for issue in db.query(QAIssueModel).filter(
+            QAIssueModel.project_id == project_id,
+            QAIssueModel.node_id == node_id,
+            QAIssueModel.status == "OPEN",
+        ).all() if issue.issue_type in {item.get("type") for item in errors}]
+        result = SemanticAssuranceService.assure_and_commit(
+            engine, chapter, node, repaired.translated_text, signature, config.model_name,
+            "semantic_repair", instruction="Sửa theo semantic critic từ nguyên bản gốc.",
+            resolved_issue_ids=resolved_ids, previous_repairs=1,
+        )
+        if not result.approved:
+            raise HTTPException(status_code=422, detail={"code": "SEMANTIC_REPAIR_FAILED", "issues": result.errors})
+        return result.__dict__
+    finally:
+        db.close()
+
+
+@router.post("/global-consistency")
+def run_global_consistency(project_id: str):
+    db = get_project_db(project_id)
+    try:
+        findings = GlobalConsistencyScanner.scan_project(db, project_id, persist=True)
+        return {"issues": findings, "total_issues": len(findings)}
+    finally:
+        db.close()
 
 
 @router.post("/run")
@@ -162,6 +326,7 @@ def find_and_replace(project_id: str, find_text: str, replace_text: str, apply_c
                 affected_nodes.append(n.id)
                 if apply_changes:
                     n.translated_content = n.translated_content.replace(find_text, replace_text)
+                    SemanticAssuranceService.invalidate_for_nodes(db, project_id, [n.id])
 
         if apply_changes:
             db.commit()
@@ -220,7 +385,6 @@ def retranslate_all_qa_issues(
         locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
         engine = ContextualTranslationEngine(db, proj, provider, config, locked_glossary)
         signature = build_translation_signature_from_config(config, locked_glossary)
-        trans_repo = TranslationRepository(db)
         fixed_count = 0
         total_nodes = len(node_ids)
 
@@ -274,8 +438,6 @@ def retranslate_all_qa_issues(
                     remaining_codes,
                     semantic_review,
                 )
-                for issue in node_open_issues:
-                    issue.status = resolution.statuses.get(issue.issue_type.upper(), "OPEN")
                 if resolution.qa_error:
                     qa_repo.upsert_open_issue(
                         project_id=project_id,
@@ -291,26 +453,18 @@ def retranslate_all_qa_issues(
                     node.status = "NEEDS_REVIEW"
                     db.commit()
                     continue
-                TranslationMemoryService.store(
-                    db=db,
-                    source_text=node.content,
-                    translated_text=result.translated_text,
-                    style_hash=signature.style_hash,
-                    glossary_hash=signature.glossary_hash,
-                    model_name=config.model_name,
-                    prompt_version=signature.prompt_version,
-                    locked_glossary=locked_glossary,
+                resolved_ids = [
+                    issue.id for issue in node_open_issues
+                    if resolution.statuses.get(issue.issue_type.upper()) == "RESOLVED"
+                ]
+                semantic = SemanticAssuranceService.assure_and_commit(
+                    engine, chapter, node, result.translated_text, signature,
+                    f"{config.model_name} (Bulk QA Fix)", "qa_bulk_fix",
+                    instruction=instruction, resolved_issue_ids=resolved_ids,
+                    previous_repairs=max(1, result.attempts - 1),
                 )
-                trans_repo.save_node_translation(
-                    node_id=nid,
-                    project_id=project_id,
-                    translated_text=result.translated_text,
-                    model_name=f"{config.model_name} (Bulk QA Fix)",
-                    instruction=instruction,
-                    created_by="qa_bulk_fix",
-                    prompt_version=signature.prompt_version,
-                )
-                fixed_count += 1
+                if semantic.approved:
+                    fixed_count += 1
             except Exception as e_node:
                 # Mọi lỗi trong bulk repair phải được lưu lại, không chỉ in ra console.
                 db.rollback()

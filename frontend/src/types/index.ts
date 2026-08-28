@@ -181,6 +181,41 @@ export interface QAIssue {
   created_at: string;
 }
 
+export interface SemanticSummary {
+  nodes_total: number;
+  risk_low: number;
+  risk_medium: number;
+  risk_high: number;
+  critic_reviewed: number;
+  semantic_pass: number;
+  semantic_failed: number;
+  semantic_error: number;
+  needs_review: number;
+}
+
+export interface SemanticReview {
+  id: string;
+  node_id: string;
+  risk_score: number;
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH';
+  critic_status: 'NOT_REQUIRED' | 'PASS' | 'FAIL' | 'ERROR';
+  critic_score?: number;
+  node_status: NodeStatus;
+  issues: Array<{ type: string; severity: string; message: string }>;
+  source_excerpt: string;
+  translation_excerpt: string;
+}
+
+export interface EntityDecision {
+  id: string;
+  source_key: string;
+  preferred_translation: string;
+  entity_type: string;
+  locked: boolean;
+  occurrences: number;
+  conflicts: number;
+}
+
 export interface LayoutProfile {
   id: string;
   project_id: string;

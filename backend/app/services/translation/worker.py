@@ -6,7 +6,7 @@ import os
 from typing import Dict, Any, Optional, Callable, List
 from app.db.engine import get_project_db
 from app.db.models import ProjectModel, ChapterModel, NodeModel
-from app.db.repository import ProjectRepository, TranslationRepository
+from app.db.repository import ProjectRepository
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.ollama_provider import OllamaProvider
 from app.services.translation.mock_provider import MockProvider
@@ -18,6 +18,7 @@ from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import build_translation_signature_from_config
 from app.services.translation.node_policy import translatable_values
 from app.services.translation.quality_gate import TranslationQualityGate
+from app.services.translation.semantic_assurance import SemanticAssuranceService
 
 
 class TranslationWorker:
@@ -205,7 +206,6 @@ class TranslationWorker:
     ):
         db = get_project_db(project_id)
         provider = override_provider or self.get_provider(model_name)
-        trans_repo = TranslationRepository(db)
         proj_repo = ProjectRepository(db)
         project = None
         systemic_failure = False
@@ -273,13 +273,15 @@ class TranslationWorker:
                             first_model.content, tm_hit, locked_glossary,
                         )
                         if tm_quality.passed:
-                            trans_repo.save_node_translation(
-                                node_id=first_model.id,
-                                project_id=project_id,
-                                translated_text=tm_hit,
-                                model_name=f"TM ({config.model_name})",
-                                prompt_version=signature.prompt_version,
+                            semantic = SemanticAssuranceService.assure_and_commit(
+                                engine, chapter, first_model, tm_hit, signature,
+                                f"TM ({config.model_name})", "translation_worker_tm",
                             )
+                            if not semantic.approved:
+                                self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
+                                    "project_id": project_id, "node_id": first_model.id,
+                                    "issues": [item.get("type") for item in semantic.errors],
+                                })
                             continue
 
                     canonical_nodes = [engine.canonical_node(node) for node in pending_models]
@@ -302,24 +304,19 @@ class TranslationWorker:
                     for result in batch_result.results:
                         source_node = next(node for node in chunk.nodes if node.id == result.node_id)
                         if result.passed:
-                            TranslationMemoryService.store(
-                                db=db,
-                                source_text=source_node.content,
-                                translated_text=result.translated_text,
-                                style_hash=signature.style_hash,
-                                glossary_hash=signature.glossary_hash,
-                                model_name=config.model_name,
-                                prompt_version=signature.prompt_version,
-                                locked_glossary=locked_glossary,
-                            )
-                            trans_repo.save_node_translation(
-                                node_id=result.node_id,
-                                project_id=project_id,
-                                translated_text=result.translated_text,
-                                model_name=config.model_name,
-                                prompt_version=signature.prompt_version,
+                            db_node = db.query(NodeModel).filter(NodeModel.id == result.node_id).first()
+                            semantic = SemanticAssuranceService.assure_and_commit(
+                                engine, chapter, db_node, result.translated_text, signature,
+                                config.model_name, "translation_worker",
                                 latency_ms=result.telemetry.latency_ms,
+                                previous_repairs=max(0, result.attempts - 1),
                             )
+                            if not semantic.approved:
+                                self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
+                                    "project_id": project_id, "node_id": result.node_id,
+                                    "attempt": result.attempts + semantic.repair_attempts,
+                                    "issues": [item.get("type") for item in semantic.errors],
+                                })
                         else:
                             db_node = db.query(NodeModel).filter(NodeModel.id == result.node_id).first()
                             if db_node:

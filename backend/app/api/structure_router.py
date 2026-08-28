@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 
 from app.db.engine import get_project_db
 from app.db.models import NodeModel, ChapterModel
+from app.services.translation.semantic_assurance import SemanticAssuranceService
 from app.db.repository import StructureRepository, ProjectRepository
 from app.models.canonical import CanonicalDocument, NodeType, DocumentNode
 from app.models.schemas import NodeUpdate, StructureConfirmRequest
@@ -35,6 +36,9 @@ def update_node(project_id: str, node_id: str, payload: NodeUpdate):
             update_dict["translated_content"] = payload.translated_content
         if payload.approval_status:
             update_dict["approval_status"] = payload.approval_status.value
+
+        if payload.content is not None or payload.translated_content is not None:
+            SemanticAssuranceService.invalidate_for_nodes(db, project_id, [node_id])
 
         updated = repo.update_node(node_id, **update_dict)
         if not updated:

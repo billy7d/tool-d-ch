@@ -16,7 +16,7 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
-import { CanonicalDocument, DocumentNode, Project, QAIssue, Chapter } from '../types';
+import { CanonicalDocument, DocumentNode, Project, QAIssue, Chapter, SemanticSummary, SemanticReview, EntityDecision } from '../types';
 
 interface Step6QAEditorProps {
   project: Project;
@@ -51,15 +51,27 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0, percent: 0, currentTitle: '' });
 
   const [expandedChapters, setExpandedChapters] = useState<Record<string, boolean>>({});
+  const [semanticSummary, setSemanticSummary] = useState<SemanticSummary | null>(null);
+  const [semanticReviews, setSemanticReviews] = useState<SemanticReview[]>([]);
+  const [entities, setEntities] = useState<EntityDecision[]>([]);
+  const [consistencyIssues, setConsistencyIssues] = useState<any[]>([]);
+  const [semanticBusy, setSemanticBusy] = useState(false);
+  const [semanticFilter, setSemanticFilter] = useState<'ALL' | 'HIGH' | 'FAIL' | 'ERROR' | 'NEEDS_REVIEW'>('ALL');
 
   const fetchData = async () => {
     try {
-      const [structData, issuesData] = await Promise.all([
+      const [structData, issuesData, summaryData, reviewData, entityData] = await Promise.all([
         apiClient.getStructure(project.id),
         apiClient.getQAIssues(project.id),
+        apiClient.getSemanticSummary(project.id),
+        apiClient.getSemanticReviews(project.id),
+        apiClient.getEntities(project.id),
       ]);
       setDoc(structData);
       setQaIssues(issuesData);
+      setSemanticSummary(summaryData);
+      setSemanticReviews(reviewData);
+      setEntities(entityData);
       if (structData.chapters.length > 0) {
         setExpandedChapters({ [structData.chapters[0].id]: true });
         if (structData.chapters[0].nodes.length > 0) {
@@ -232,6 +244,59 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
 
   const uniqueIssuesCount = Array.from(new Set(qaIssues.map((i) => i.node_id).filter(Boolean))).length;
 
+  const handleSemanticScan = async () => {
+    setSemanticBusy(true);
+    try {
+      await apiClient.runSemanticReview(project.id);
+      const [summary, reviews, issues] = await Promise.all([
+        apiClient.getSemanticSummary(project.id),
+        apiClient.getSemanticReviews(project.id),
+        apiClient.getQAIssues(project.id),
+      ]);
+      setSemanticSummary(summary);
+      setSemanticReviews(reviews);
+      setQaIssues(issues);
+    } catch (e) {
+      alert('Lỗi Semantic Assurance: ' + e);
+    } finally {
+      setSemanticBusy(false);
+    }
+  };
+
+  const handleConsistencyScan = async () => {
+    try {
+      const result = await apiClient.runGlobalConsistency(project.id);
+      setConsistencyIssues(result.issues || []);
+      setQaIssues(await apiClient.getQAIssues(project.id));
+    } catch (e) {
+      alert('Lỗi quét nhất quán: ' + e);
+    }
+  };
+
+  const handleSemanticRepair = async (nodeId: string) => {
+    setSemanticBusy(true);
+    try {
+      await apiClient.repairSemanticNode(project.id, nodeId);
+      await fetchData();
+    } catch (e) {
+      alert('Semantic repair chưa đạt: ' + e);
+    } finally {
+      setSemanticBusy(false);
+    }
+  };
+
+  const handleToggleEntity = async (entity: EntityDecision) => {
+    await apiClient.updateEntity(project.id, entity.id, { locked: !entity.locked });
+    setEntities(await apiClient.getEntities(project.id));
+  };
+
+  const handleEntityTranslation = async (entity: EntityDecision, preferredTranslation: string) => {
+    const value = preferredTranslation.trim();
+    if (!value || value === entity.preferred_translation) return;
+    await apiClient.updateEntity(project.id, entity.id, { preferred_translation: value });
+    setEntities(await apiClient.getEntities(project.id));
+  };
+
   return (
     <div className="h-[calc(100vh-7.5rem)] flex flex-col">
       {/* Top action toolbar */}
@@ -283,6 +348,63 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
+      </div>
+
+      <div className="shrink-0 grid grid-cols-3 gap-3 px-5 py-3 bg-slate-950/70 border-b border-slate-800 max-h-52 overflow-y-auto">
+        <section className="rounded-xl border border-sky-900/60 bg-sky-950/20 p-3 text-xs">
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-semibold text-sky-300">Semantic Assurance</span>
+            <button onClick={handleSemanticScan} disabled={semanticBusy} className="px-2 py-1 rounded bg-sky-500/20 text-sky-300">
+              {semanticBusy ? 'Đang quét...' : 'Quét có chọn lọc'}
+            </button>
+          </div>
+          <div className="grid grid-cols-4 gap-1 text-center text-slate-300">
+            <span>LOW {semanticSummary?.risk_low || 0}</span>
+            <span>MED {semanticSummary?.risk_medium || 0}</span>
+            <span>HIGH {semanticSummary?.risk_high || 0}</span>
+            <span className="text-amber-300">Review {semanticSummary?.needs_review || 0}</span>
+          </div>
+          <div className="flex gap-1 mt-2">
+            {(['ALL', 'HIGH', 'FAIL', 'ERROR', 'NEEDS_REVIEW'] as const).map((value) => (
+              <button key={value} onClick={() => setSemanticFilter(value)} className={`px-1 rounded ${semanticFilter === value ? 'bg-sky-500/30 text-sky-200' : 'text-slate-500'}`}>{value}</button>
+            ))}
+          </div>
+          {semanticReviews.filter((item) => semanticFilter === 'ALL' || item.risk_level === semanticFilter || item.critic_status === semanticFilter || item.node_status === semanticFilter).slice(0, 2).map((item) => (
+            <div key={item.id} className="mt-2 flex items-center gap-2 text-rose-300">
+              <span className="truncate flex-1">{item.risk_level} · {item.critic_status} · {item.issues[0]?.type || 'Không cần critic'}</span>
+              {['FAIL', 'ERROR'].includes(item.critic_status) && <button onClick={() => handleSemanticRepair(item.node_id)} className="text-sky-300 shrink-0">Sửa</button>}
+            </div>
+          ))}
+        </section>
+
+        <section className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-3 text-xs">
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-semibold text-amber-300">Global Consistency</span>
+            <button onClick={handleConsistencyScan} className="px-2 py-1 rounded bg-amber-500/20 text-amber-300">Quét toàn cục</button>
+          </div>
+          <div className="text-slate-400">{consistencyIssues.length} nhóm không nhất quán</div>
+          {consistencyIssues.slice(0, 2).map((item, index) => (
+            <div key={`${item.source_key}-${index}`} className="mt-2 truncate text-amber-200">{item.issue_type}: {item.source_key}</div>
+          ))}
+        </section>
+
+        <section className="rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-3 text-xs overflow-x-auto">
+          <div className="font-semibold text-emerald-300 mb-2">Entity Decisions ({entities.length})</div>
+          {entities.length === 0 ? <div className="text-slate-500">Chưa có quyết định entity.</div> : (
+            <table className="w-full text-left text-[10px] text-slate-300">
+              <thead><tr className="text-slate-500"><th>Nguồn</th><th>Bản dịch ưu tiên</th><th>Loại</th><th>Lần/Xung đột</th><th>Khóa</th></tr></thead>
+              <tbody>{entities.slice(0, 4).map((entity) => (
+                <tr key={entity.id} className="border-t border-emerald-950">
+                  <td className="pr-1 max-w-24 truncate">{entity.source_key}</td>
+                  <td className="pr-1"><input defaultValue={entity.preferred_translation} onBlur={(event) => handleEntityTranslation(entity, event.target.value)} className="w-28 bg-slate-950 rounded px-1 py-0.5" /></td>
+                  <td>{entity.entity_type}</td>
+                  <td>{entity.occurrences}/{entity.conflicts}</td>
+                  <td><button onClick={() => handleToggleEntity(entity)} className="text-emerald-300">{entity.locked ? 'Mở' : 'Khóa'}</button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </section>
       </div>
 
       {/* 3-Pane Editor Layout */}

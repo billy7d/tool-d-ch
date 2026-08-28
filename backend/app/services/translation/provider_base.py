@@ -106,3 +106,15 @@ class TranslationProvider(ABC):
     ) -> Dict[str, Any]:
         """Performs AI QA review checking accuracy, terminology, and naturalness."""
         pass
+
+    def review_semantic_fidelity(
+        self,
+        source_text: str,
+        translated_text: str,
+        glossary_terms: Dict[str, str],
+        entity_context: Dict[str, str],
+        document_type: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Review semantic Phase 3; provider cũ có thể chưa hỗ trợ contract này."""
+        raise NotImplementedError("Provider chưa hỗ trợ semantic-critic-v1")

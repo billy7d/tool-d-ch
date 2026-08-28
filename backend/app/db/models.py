@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -201,6 +202,57 @@ class QAIssueModel(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("ProjectModel", back_populates="qa_issues")
+
+
+class SemanticReviewModel(Base):
+    __tablename__ = "semantic_reviews"
+
+    id = Column(String(64), primary_key=True)
+    project_id = Column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    node_id = Column(String(64), ForeignKey("nodes.id", ondelete="CASCADE"), nullable=False, index=True)
+    translation_version = Column(Integer, nullable=False)
+    signature = Column(String(64), nullable=False, index=True)
+    risk_score = Column(Float, nullable=False, default=0.0)
+    risk_level = Column(String(16), nullable=False, default="LOW")
+    critic_status = Column(String(16), nullable=False, default="NOT_REQUIRED")
+    critic_score = Column(Float, nullable=True)
+    issues_json = Column(JSON, default=list)
+    model_name = Column(String(128), default="")
+    prompt_version = Column(String(64), default="semantic-critic-v1")
+    critic_request_tokens = Column(Integer, default=0)
+    critic_latency_ms = Column(Float, default=0.0)
+    critic_calls = Column(Integer, default=0)
+    is_stale = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "node_id", "signature", name="uq_semantic_review_signature"),
+        Index("ix_semantic_reviews_project_status", "project_id", "critic_status"),
+    )
+
+
+class EntityDecisionModel(Base):
+    __tablename__ = "entity_decisions"
+
+    id = Column(String(64), primary_key=True)
+    project_id = Column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_key = Column(String(255), nullable=False)
+    entity_type = Column(String(32), nullable=False, default="OTHER")
+    preferred_translation = Column(String(255), nullable=False)
+    aliases_json = Column(JSON, default=list)
+    locked = Column(Boolean, default=False)
+    confidence = Column(Float, default=0.5)
+    source = Column(String(32), default="INFERRED")
+    first_node_id = Column(String(64), ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True)
+    occurrences = Column(Integer, default=1)
+    conflicts = Column(Integer, default=0)
+    revision = Column(Integer, default=1)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "source_key", name="uq_entity_decision_project_source"),
+        Index("ix_entity_decisions_project_locked", "project_id", "locked"),
+    )
 
 
 class AssetModel(Base):

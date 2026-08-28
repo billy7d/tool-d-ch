@@ -358,3 +358,29 @@ class OllamaProvider(TranslationProvider):
             return qa_error(f"Ollama QA HTTP {res.status_code}: {res.text[:200]}")
         except Exception as exc:
             return qa_error(f"Ollama QA error: {exc}")
+
+    def review_semantic_fidelity(self, source_text, translated_text, glossary_terms, entity_context, document_type, model=None):
+        target_model = model or self.default_model
+        system_message = (
+            "You are a strict semantic fidelity critic for English-to-Vietnamese translation. "
+            "Judge meaning only, not literal wording or harmless Vietnamese restructuring. Do not rewrite. "
+            "Use no outside knowledge. Return JSON only with status PASS or FAIL, score 0..1, errors array, "
+            "and checks for completeness, meaning, polarity, modality, causality, scope, entity_reference. "
+            "Allowed error types: SEMANTIC_OMISSION, SEMANTIC_ADDITION, MEANING_DRIFT, MODALITY_ERROR, "
+            "CAUSALITY_ERROR, SCOPE_ERROR, CONDITION_ERROR, COMPARISON_ERROR, ENTITY_REFERENCE_ERROR, PRONOUN_AMBIGUITY."
+        )
+        user_message = json.dumps({
+            "source": source_text, "candidate": translated_text,
+            "locked_glossary": glossary_terms, "entities": entity_context,
+            "document_type": document_type,
+        }, ensure_ascii=False)
+        payload = {
+            "model": target_model,
+            "messages": [{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
+            "format": "json", "stream": False, "keep_alive": "60m",
+            "options": {"temperature": 0.0, "num_ctx": self.effective_context_window(target_model)},
+        }
+        response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
+        if response.status_code != 200:
+            raise RuntimeError(f"Ollama semantic critic HTTP {response.status_code}: {response.text[:200]}")
+        return json.loads(response.json().get("message", {}).get("content", ""))

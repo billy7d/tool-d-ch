@@ -256,3 +256,29 @@ class OpenAILocalProvider(TranslationProvider):
             return validate_qa_result(json.loads(content))
         except Exception as exc:
             return qa_error(f"OpenAI Local QA error: {exc}")
+
+    def review_semantic_fidelity(self, source_text, translated_text, glossary_terms, entity_context, document_type, model=None):
+        target_model = model or self.default_model
+        system_message = (
+            "You are a strict semantic fidelity critic for English-to-Vietnamese translation. "
+            "Judge meaning only; accept natural non-literal Vietnamese restructuring. Do not rewrite or use outside knowledge. "
+            "Return JSON only: status PASS|FAIL, score, errors, and checks for completeness, meaning, polarity, modality, causality, scope, entity_reference."
+        )
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": json.dumps({
+                    "source": source_text, "candidate": translated_text, "locked_glossary": glossary_terms,
+                    "entities": entity_context, "document_type": document_type,
+                }, ensure_ascii=False)},
+            ],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+        }
+        response = self.session.post(
+            f"{self.base_url}/chat/completions", headers=self._headers(), json=payload, timeout=60.0,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"OpenAI Local semantic critic HTTP {response.status_code}: {response.text[:200]}")
+        return json.loads(response.json()["choices"][0]["message"]["content"])

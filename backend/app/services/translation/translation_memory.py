@@ -55,6 +55,7 @@ class TranslationMemoryService:
         model_name: str = "",
         prompt_version: str = "phase1-v2",
         locked_glossary: Optional[Dict[str, str]] = None,
+        commit: bool = True,
     ):
         if not style_hash or not glossary_hash or not prompt_version:
             raise ValueError("TM Phase 1 yêu cầu đầy đủ style_hash, glossary_hash và prompt_version")
@@ -90,4 +91,7 @@ class TranslationMemoryService:
                 prompt_version=prompt_version,
             )
             db.add(tm_entry)
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()

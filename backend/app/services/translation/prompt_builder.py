@@ -148,6 +148,10 @@ class PromptBuilder:
             parts.append("MANDATORY RELEVANT GLOSSARY\n" + "\n".join(
                 f'- "{source}" -> "{target}"' for source, target in context.glossary.items()
             ))
+        if context.entity_decisions:
+            parts.append("CURRENT RELEVANT ENTITY DECISIONS\n" + "\n".join(
+                f'- "{source}" -> "{target}"' for source, target in context.entity_decisions.items()
+            ))
         return parts
 
     @classmethod

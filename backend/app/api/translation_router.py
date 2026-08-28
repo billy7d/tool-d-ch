@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional, List
 
 from app.db.engine import get_project_db
 from app.db.models import NodeModel, ChapterModel
-from app.db.repository import ProjectRepository, TranslationRepository
+from app.db.repository import ProjectRepository
 from app.models.schemas import (
     TranslationStartRequest, RetranslateNodeRequest, TranslationStatusResponse,
     TranslationPreviewRequest, TranslationPreviewResponse,
@@ -19,6 +19,7 @@ from app.services.translation.translation_signature import (
     PROMPT_VERSION,
     build_translation_signature_from_config,
 )
+from app.services.translation.semantic_assurance import SemanticAssuranceService
 
 router = APIRouter(prefix="/api/projects/{project_id}/translation", tags=["Translation"])
 
@@ -228,30 +229,20 @@ def retranslate_single_node(project_id: str, node_id: str, payload: Optional[Ret
             )
 
         signature = build_translation_signature_from_config(config, locked_glossary)
-        trans_repo = TranslationRepository(db)
-        TranslationMemoryService.store(
-            db=db,
-            source_text=node.content,
-            translated_text=result.translated_text,
-            style_hash=signature.style_hash,
-            glossary_hash=signature.glossary_hash,
-            model_name=config.model_name,
-            prompt_version=signature.prompt_version,
-            locked_glossary=locked_glossary,
+        semantic = SemanticAssuranceService.assure_and_commit(
+            engine, chapter, node, result.translated_text, signature, config.model_name,
+            "user_retranslate", instruction=instruction,
+            previous_repairs=max(1, result.attempts - 1),
         )
-        TranslationRepository(db).save_node_translation(
-            node_id=node_id,
-            project_id=project_id,
-            translated_text=result.translated_text,
-            model_name=config.model_name,
-            instruction=instruction,
-            created_by="user_retranslate",
-            prompt_version=signature.prompt_version,
-        )
+        if not semantic.approved:
+            raise HTTPException(status_code=422, detail={
+                "code": "SEMANTIC_VALIDATION_FAILED", "status": semantic.status,
+                "issues": semantic.errors,
+            })
 
         return {
             "node_id": node_id,
-            "translated_content": result.translated_text,
+            "translated_content": semantic.translated_text,
             "message": "Dịch lại hoàn tất."
         }
     except HTTPException:

@@ -129,3 +129,43 @@ class MockProvider(TranslationProvider):
             "suggested_revision": "",
             "error": None,
         }
+
+    def review_semantic_fidelity(
+        self,
+        source_text: str,
+        translated_text: str,
+        glossary_terms: Dict[str, str],
+        entity_context: Dict[str, str],
+        document_type: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Mock có tín hiệu cố định để CI không cần Ollama."""
+        marker_map = {
+            "[[OMISSION]]": "SEMANTIC_OMISSION",
+            "[[ADDITION]]": "SEMANTIC_ADDITION",
+            "[[DRIFT]]": "MEANING_DRIFT",
+            "[[MODALITY]]": "MODALITY_ERROR",
+            "[[CAUSALITY]]": "CAUSALITY_ERROR",
+            "[[SCOPE]]": "SCOPE_ERROR",
+            "[[CONDITION]]": "CONDITION_ERROR",
+            "[[COMPARISON]]": "COMPARISON_ERROR",
+            "[[ENTITY]]": "ENTITY_REFERENCE_ERROR",
+            "[[PRONOUN]]": "PRONOUN_AMBIGUITY",
+        }
+        issue_type = next((value for marker, value in marker_map.items() if marker in translated_text), None)
+        if not issue_type:
+            return {
+                "status": "PASS", "score": 0.98, "errors": [],
+                "checks": {key: "PASS" for key in ("completeness", "meaning", "polarity", "modality", "causality", "scope", "entity_reference")},
+            }
+        check = {
+            "MODALITY_ERROR": "modality", "CAUSALITY_ERROR": "causality", "SCOPE_ERROR": "scope",
+            "ENTITY_REFERENCE_ERROR": "entity_reference", "SEMANTIC_OMISSION": "completeness",
+        }.get(issue_type, "meaning")
+        checks = {key: "PASS" for key in ("completeness", "meaning", "polarity", "modality", "causality", "scope", "entity_reference")}
+        checks[check] = "FAIL"
+        return {
+            "status": "FAIL", "score": 0.35,
+            "errors": [{"type": issue_type, "severity": "ERROR", "source_span": "", "target_span": "", "message": "Lỗi semantic được gieo trong fixture."}],
+            "checks": checks,
+        }
