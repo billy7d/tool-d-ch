@@ -4,6 +4,7 @@ from app.db.models import NodeModel
 from app.db.repository import QARepository
 from app.services.translation.worker import translation_worker
 from app.services.translation.glossary_service import GlossaryService
+from app.services.qa.result_validator import validate_qa_result
 
 
 class AIQAEngine:
@@ -16,12 +17,13 @@ class AIQAEngine:
         glossary_map = GlossaryService.get_locked_glossary_map(db, project_id)
 
         try:
-            result = provider.review_translation(
+            raw_result = provider.review_translation(
                 source_text=node.content,
                 translated_text=node.translated_content,
                 glossary_terms=glossary_map,
                 model=model_name
             )
+            result = validate_qa_result(raw_result)
 
             if result.get("status") == "ERROR" or result.get("error"):
                 return {

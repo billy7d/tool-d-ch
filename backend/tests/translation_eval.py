@@ -26,7 +26,7 @@ from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import PROMPT_VERSION
 
 
-DATASET_VERSION = "phase2-1-1-eval-v1"
+DATASET_VERSION = "phase2-1-2-eval-v1"
 
 
 def build_phase1_baseline_prompt(node: DocumentNode, glossary: Dict[str, str]) -> str:
@@ -47,7 +47,9 @@ def _metric_bucket() -> Dict[str, Any]:
         "provider_calls": 0, "repairs": 0, "context_overflow_count": 0,
         "source_tokens": 0, "context_tokens": 0,
         "wrong_target_language": 0, "number_mismatch": 0,
-        "reference_mismatch": 0, "glossary_failure": 0, "negation_loss": 0,
+        "number_addition": 0, "reference_mismatch": 0, "reference_addition": 0,
+        "url_mismatch": 0, "url_addition": 0, "glossary_failure": 0, "negation_loss": 0,
+        "qa_error": 0,
         "mapping_failure": 0,
     }
 
@@ -56,9 +58,14 @@ def _record_issues(bucket: Dict[str, Any], issues: List[Dict[str, str]]) -> List
     codes = [issue.get("code", "") for issue in issues]
     bucket["wrong_target_language"] += int("WRONG_TARGET_LANGUAGE" in codes or "FOREIGN_SCRIPT_CONTAMINATION" in codes)
     bucket["number_mismatch"] += int("NUMBER_MISMATCH" in codes)
+    bucket["number_addition"] += int("NUMBER_ADDITION" in codes)
     bucket["reference_mismatch"] += int("REFERENCE_MISMATCH" in codes)
+    bucket["reference_addition"] += int("REFERENCE_ADDITION" in codes)
+    bucket["url_mismatch"] += int("URL_MISMATCH" in codes)
+    bucket["url_addition"] += int("URL_ADDITION" in codes)
     bucket["glossary_failure"] += int("GLOSSARY_MISMATCH" in codes)
     bucket["negation_loss"] += int("NEGATION_LOSS" in codes)
+    bucket["qa_error"] += int("QA_ERROR" in codes)
     bucket["mapping_failure"] += int("NODE_MAPPING_ERROR" in codes or "MISSING_NODE_IDS" in codes)
     return codes
 
@@ -200,8 +207,9 @@ def run(dataset_path: Path, model_name: str = "mock-qwen2.5:7b", human_csv: Path
                 "phase2_1_1": _finalize_bucket(aggregate_phase, len(rows)),
             }
             critical_keys = (
-                "wrong_target_language", "number_mismatch", "reference_mismatch",
-                "glossary_failure", "negation_loss", "mapping_failure",
+                "wrong_target_language", "number_mismatch", "number_addition",
+                "reference_mismatch", "reference_addition", "url_mismatch", "url_addition",
+                "glossary_failure", "negation_loss", "qa_error", "mapping_failure",
             )
             baseline_critical = sum(metrics["aggregate"]["baseline"][key] for key in critical_keys)
             phase_critical = sum(metrics["aggregate"]["phase2_1_1"][key] for key in critical_keys)

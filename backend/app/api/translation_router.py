@@ -229,15 +229,6 @@ def retranslate_single_node(project_id: str, node_id: str, payload: Optional[Ret
 
         signature = build_translation_signature_from_config(config, locked_glossary)
         trans_repo = TranslationRepository(db)
-        trans_repo.save_node_translation(
-            node_id=node_id,
-            project_id=project_id,
-            translated_text=result.translated_text,
-            model_name=config.model_name,
-            instruction=instruction,
-            created_by="user_retranslate",
-            prompt_version=signature.prompt_version,
-        )
         TranslationMemoryService.store(
             db=db,
             source_text=node.content,
@@ -245,6 +236,16 @@ def retranslate_single_node(project_id: str, node_id: str, payload: Optional[Ret
             style_hash=signature.style_hash,
             glossary_hash=signature.glossary_hash,
             model_name=config.model_name,
+            prompt_version=signature.prompt_version,
+            locked_glossary=locked_glossary,
+        )
+        TranslationRepository(db).save_node_translation(
+            node_id=node_id,
+            project_id=project_id,
+            translated_text=result.translated_text,
+            model_name=config.model_name,
+            instruction=instruction,
+            created_by="user_retranslate",
             prompt_version=signature.prompt_version,
         )
 

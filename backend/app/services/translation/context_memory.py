@@ -169,7 +169,12 @@ class ChapterMemoryBuilder:
                 pass
 
         sample = cls.stratified_sample(nodes)
-        summary = (sample[:600].strip() or f"Chương '{chapter_title}' chưa có nội dung tóm tắt.")
+        # Fallback không đưa nguyên văn nguồn vào context khi provider không tạo được summary.
+        summary = (
+            f"Chương '{chapter_title}' thuộc lĩnh vực {normalized_document_type}. "
+            "Không có tóm tắt ngữ nghĩa đáng tin cậy từ provider."
+            if sample else f"Chương '{chapter_title}' chưa có nội dung tóm tắt."
+        )
         structured: Dict[str, Any] = {}
         if provider and sample:
             try:

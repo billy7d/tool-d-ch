@@ -430,6 +430,45 @@ class QARepository:
         self.db.refresh(issue)
         return issue
 
+    def upsert_open_issue(
+        self,
+        project_id: str,
+        node_id: Optional[str],
+        issue_type: str,
+        message: str,
+        severity: str = "WARNING",
+        source_snippet: Optional[str] = None,
+        translation_snippet: Optional[str] = None,
+        suggested_fix: Optional[str] = None,
+    ) -> QAIssueModel:
+        """Cập nhật lỗi đang mở theo node để retry không tạo QA_ERROR vô hạn."""
+        existing = self.db.query(QAIssueModel).filter(
+            QAIssueModel.project_id == project_id,
+            QAIssueModel.node_id == node_id,
+            QAIssueModel.issue_type == issue_type,
+            QAIssueModel.status == "OPEN",
+        ).order_by(desc(QAIssueModel.created_at)).first()
+        if not existing:
+            return self.add_issue(
+                project_id=project_id,
+                node_id=node_id,
+                issue_type=issue_type,
+                severity=severity,
+                message=message,
+                source_snippet=source_snippet,
+                translation_snippet=translation_snippet,
+                suggested_fix=suggested_fix,
+            )
+
+        existing.severity = severity
+        existing.message = message
+        existing.source_snippet = source_snippet
+        existing.translation_snippet = translation_snippet
+        existing.suggested_fix = suggested_fix
+        self.db.commit()
+        self.db.refresh(existing)
+        return existing
+
     def list_issues(self, project_id: str, status: Optional[str] = None) -> List[QAIssueModel]:
         query = self.db.query(QAIssueModel).filter(QAIssueModel.project_id == project_id)
         if status:

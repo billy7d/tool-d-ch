@@ -266,6 +266,7 @@ class TranslationWorker:
                         style_hash=signature.style_hash,
                         glossary_hash=signature.glossary_hash,
                         prompt_version=signature.prompt_version,
+                        locked_glossary=locked_glossary,
                     )
                     if tm_hit:
                         tm_quality = TranslationQualityGate().validate(
@@ -301,14 +302,6 @@ class TranslationWorker:
                     for result in batch_result.results:
                         source_node = next(node for node in chunk.nodes if node.id == result.node_id)
                         if result.passed:
-                            trans_repo.save_node_translation(
-                                node_id=result.node_id,
-                                project_id=project_id,
-                                translated_text=result.translated_text,
-                                model_name=config.model_name,
-                                prompt_version=signature.prompt_version,
-                                latency_ms=result.telemetry.latency_ms,
-                            )
                             TranslationMemoryService.store(
                                 db=db,
                                 source_text=source_node.content,
@@ -317,6 +310,15 @@ class TranslationWorker:
                                 glossary_hash=signature.glossary_hash,
                                 model_name=config.model_name,
                                 prompt_version=signature.prompt_version,
+                                locked_glossary=locked_glossary,
+                            )
+                            trans_repo.save_node_translation(
+                                node_id=result.node_id,
+                                project_id=project_id,
+                                translated_text=result.translated_text,
+                                model_name=config.model_name,
+                                prompt_version=signature.prompt_version,
+                                latency_ms=result.telemetry.latency_ms,
                             )
                         else:
                             db_node = db.query(NodeModel).filter(NodeModel.id == result.node_id).first()

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional
 
+from app.services.translation.reference_validator import ReferenceValidator
+
 
 UNIT_PATTERN = r"°C|°F|kHz|MHz|GHz|USD|EUR|kg|km|cm|mm|MB|GB|ms|Hz|s"
 NUMERIC_PATTERN = re.compile(
@@ -66,7 +68,14 @@ class NumericValidator:
     @staticmethod
     def extract(text: str) -> List[NumericToken]:
         tokens: List[NumericToken] = []
+        # Mã số của Figure/Section thuộc validator reference, không phải numeric fact.
+        reference_spans = [
+            (match.start(), match.end())
+            for match in ReferenceValidator.REFERENCE_PATTERN.finditer(text or "")
+        ]
         for match in NUMERIC_PATTERN.finditer(text or ""):
+            if any(start <= match.start() < end for start, end in reference_spans):
+                continue
             raw_number = match.group("number")
             currency_symbol = match.group("currency")
             unit = match.group("unit")
@@ -103,4 +112,5 @@ class NumericValidator:
 
         missing = expand(source_tokens, missing_counts)
         unexpected = expand(target_tokens, unexpected_counts)
-        return NumericValidationResult(not missing, missing, unexpected)
+        # Candidate chỉ đạt khi bảo toàn đủ số nguồn và không tự thêm số mới.
+        return NumericValidationResult(not missing and not unexpected, missing, unexpected)

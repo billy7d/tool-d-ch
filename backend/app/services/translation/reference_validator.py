@@ -1,6 +1,6 @@
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 
@@ -19,6 +19,7 @@ class ReferenceToken:
 class ReferenceValidationResult:
     passed: bool
     missing: List[ReferenceToken]
+    unexpected: List[ReferenceToken] = field(default_factory=list)
 
 
 class ReferenceValidator:
@@ -62,13 +63,22 @@ class ReferenceValidator:
     def validate(cls, source_text: str, translated_text: str) -> ReferenceValidationResult:
         source_tokens = cls.extract(source_text)
         target_tokens = cls.extract(translated_text)
-        missing_counts = Counter(token.semantic_key for token in source_tokens) - Counter(
-            token.semantic_key for token in target_tokens
-        )
-        remaining = Counter(missing_counts)
-        missing: List[ReferenceToken] = []
-        for token in source_tokens:
-            if remaining[token.semantic_key] > 0:
-                missing.append(token)
-                remaining[token.semantic_key] -= 1
-        return ReferenceValidationResult(not missing, missing)
+        source_counts = Counter(token.semantic_key for token in source_tokens)
+        target_counts = Counter(token.semantic_key for token in target_tokens)
+
+        # Đếm theo khóa ngữ nghĩa để nhãn tiếng Anh và tiếng Việt được xem là tương đương.
+        missing_counts = source_counts - target_counts
+        unexpected_counts = target_counts - source_counts
+
+        def expand(tokens: List[ReferenceToken], counts: Counter) -> List[ReferenceToken]:
+            remaining = Counter(counts)
+            result: List[ReferenceToken] = []
+            for token in tokens:
+                if remaining[token.semantic_key] > 0:
+                    result.append(token)
+                    remaining[token.semantic_key] -= 1
+            return result
+
+        missing = expand(source_tokens, missing_counts)
+        unexpected = expand(target_tokens, unexpected_counts)
+        return ReferenceValidationResult(not missing and not unexpected, missing, unexpected)

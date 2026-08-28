@@ -1,6 +1,6 @@
 import hashlib
 import uuid
-from typing import Optional
+from typing import Dict, Optional
 from sqlalchemy.orm import Session
 from app.db.models import TranslationMemoryModel
 from app.services.translation.quality_gate import TranslationQualityGate
@@ -19,6 +19,7 @@ class TranslationMemoryService:
         style_hash: str,
         glossary_hash: str,
         prompt_version: str,
+        locked_glossary: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
         # Production chỉ tái sử dụng bản ghi có đầy đủ chữ ký Phase 1.
         if not style_hash or not glossary_hash or not prompt_version:
@@ -32,7 +33,16 @@ class TranslationMemoryService:
         )
 
         match = query.first()
-        return match.translated_text if match else None
+        if not match:
+            return None
+        if locked_glossary is not None:
+            # TM hit phải qua lại Quality Gate bằng glossary hiện tại của project.
+            quality = TranslationQualityGate().validate(
+                source_text, match.translated_text, locked_glossary or {},
+            )
+            if not quality.passed:
+                return None
+        return match.translated_text
 
     @classmethod
     def store(
@@ -43,13 +53,16 @@ class TranslationMemoryService:
         style_hash: str = "",
         glossary_hash: str = "",
         model_name: str = "",
-        prompt_version: str = "phase1-v2"
+        prompt_version: str = "phase1-v2",
+        locked_glossary: Optional[Dict[str, str]] = None,
     ):
         if not style_hash or not glossary_hash or not prompt_version:
             raise ValueError("TM Phase 1 yêu cầu đầy đủ style_hash, glossary_hash và prompt_version")
         if not translated_text or not translated_text.strip():
             raise ValueError("Không được lưu bản dịch rỗng vào TM")
-        quality = TranslationQualityGate().validate(source_text, translated_text, {})
+        quality = TranslationQualityGate().validate(
+            source_text, translated_text, locked_glossary or {},
+        )
         if not quality.passed:
             codes = ", ".join(issue["code"] for issue in quality.issues if issue["severity"] == "ERROR")
             raise ValueError(f"Không được lưu candidate không qua Quality Gate vào TM: {codes}")

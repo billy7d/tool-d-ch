@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -10,6 +11,21 @@ from app.services.translation.reference_validator import ReferenceValidator
 
 
 URL_PATTERN = re.compile(r"https?://[^\s)\]}]+|www\.[^\s)\]}]+", re.IGNORECASE)
+
+
+def _expand_counter(values: Counter) -> List[str]:
+    """Trả về các giá trị theo số lần xuất hiện để thông báo không làm mất bản sao."""
+    expanded: List[str] = []
+    for value, count in values.items():
+        expanded.extend([value] * count)
+    return expanded
+
+
+def _url_counts(text: str) -> Counter:
+    """Chuẩn hóa dấu câu kết câu để URL hợp lệ không bị coi là URL khác."""
+    return Counter(url.rstrip(".,;:!?") for url in URL_PATTERN.findall(text or ""))
+
+
 @dataclass(frozen=True)
 class QualityGateResult:
     passed: bool
@@ -43,18 +59,29 @@ class TranslationQualityGate:
                 issues.append(self._issue(language.reason or "WRONG_TARGET_LANGUAGE", "ERROR", "Bản dịch không đạt yêu cầu ngôn ngữ đích."))
 
             numeric = NumericValidator.validate(source, target)
-            if not numeric.passed:
+            if numeric.missing:
                 missing_numbers = ", ".join(token.raw for token in numeric.missing)
                 issues.append(self._issue("NUMBER_MISMATCH", "ERROR", f"Thiếu hoặc sai số liệu từ nguồn: {missing_numbers}"))
+            if numeric.unexpected:
+                unexpected_numbers = ", ".join(token.raw for token in numeric.unexpected)
+                issues.append(self._issue("NUMBER_ADDITION", "ERROR", f"Bản dịch bổ sung số liệu không có trong nguồn: {unexpected_numbers}"))
 
-            missing_urls = sorted(set(URL_PATTERN.findall(source)) - set(URL_PATTERN.findall(target)))
+            source_url_counts = _url_counts(source)
+            target_url_counts = _url_counts(target)
+            missing_urls = _expand_counter(source_url_counts - target_url_counts)
+            unexpected_urls = _expand_counter(target_url_counts - source_url_counts)
             if missing_urls:
                 issues.append(self._issue("URL_MISMATCH", "ERROR", f"Thiếu URL từ nguồn: {', '.join(missing_urls)}"))
+            if unexpected_urls:
+                issues.append(self._issue("URL_ADDITION", "ERROR", f"Bản dịch bổ sung URL không có trong nguồn: {', '.join(unexpected_urls)}"))
 
             references = ReferenceValidator.validate(source, target)
-            if not references.passed:
+            if references.missing:
                 missing_refs = ", ".join(token.raw for token in references.missing)
                 issues.append(self._issue("REFERENCE_MISMATCH", "ERROR", f"Thiếu hoặc sai tham chiếu: {missing_refs}"))
+            if references.unexpected:
+                unexpected_refs = ", ".join(token.raw for token in references.unexpected)
+                issues.append(self._issue("REFERENCE_ADDITION", "ERROR", f"Bản dịch bổ sung tham chiếu không có trong nguồn: {unexpected_refs}"))
 
             if len(source) > 100:
                 ratio = len(target) / max(len(source), 1)

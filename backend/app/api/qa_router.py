@@ -27,6 +27,7 @@ def run_qa_checks(project_id: str, enable_ai_qa: bool = False):
     qa_repo = QARepository(db)
 
     try:
+        locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
         # Clear existing open issues
         db.query(QAIssueModel).filter(
             QAIssueModel.project_id == project_id,
@@ -43,7 +44,7 @@ def run_qa_checks(project_id: str, enable_ai_qa: bool = False):
 
         for n in nodes:
             # 1. Deterministic QA
-            issues = DeterministicQA.audit_node(n)
+            issues = DeterministicQA.audit_node(n, locked_glossary)
             for iss in issues:
                 qa_repo.add_issue(
                     project_id=project_id,
@@ -183,6 +184,7 @@ def retranslate_all_qa_issues(
 ):
     """Dịch lại các node có lỗi QA bằng đúng engine và quality path chuẩn."""
     db = get_project_db(project_id)
+    qa_repo = QARepository(db)
     try:
         issues = db.query(QAIssueModel).filter(
             QAIssueModel.project_id == project_id,
@@ -239,7 +241,7 @@ def retranslate_all_qa_issues(
                     continue
                 result = engine.repair_node(chapter, engine.canonical_node(node), node_issues)
                 probe = NodeModel(content=node.content, translated_content=result.translated_text)
-                deterministic_issues = DeterministicQA.audit_node(probe)
+                deterministic_issues = DeterministicQA.audit_node(probe, locked_glossary)
                 if not result.passed:
                     node.status = "NEEDS_REVIEW"
                     db.commit()
@@ -275,7 +277,7 @@ def retranslate_all_qa_issues(
                 for issue in node_open_issues:
                     issue.status = resolution.statuses.get(issue.issue_type.upper(), "OPEN")
                 if resolution.qa_error:
-                    qa_repo.add_issue(
+                    qa_repo.upsert_open_issue(
                         project_id=project_id,
                         node_id=nid,
                         issue_type="QA_ERROR",
@@ -289,6 +291,16 @@ def retranslate_all_qa_issues(
                     node.status = "NEEDS_REVIEW"
                     db.commit()
                     continue
+                TranslationMemoryService.store(
+                    db=db,
+                    source_text=node.content,
+                    translated_text=result.translated_text,
+                    style_hash=signature.style_hash,
+                    glossary_hash=signature.glossary_hash,
+                    model_name=config.model_name,
+                    prompt_version=signature.prompt_version,
+                    locked_glossary=locked_glossary,
+                )
                 trans_repo.save_node_translation(
                     node_id=nid,
                     project_id=project_id,
@@ -298,17 +310,23 @@ def retranslate_all_qa_issues(
                     created_by="qa_bulk_fix",
                     prompt_version=signature.prompt_version,
                 )
-                TranslationMemoryService.store(
-                    db=db,
-                    source_text=node.content,
-                    translated_text=result.translated_text,
-                    style_hash=signature.style_hash,
-                    glossary_hash=signature.glossary_hash,
-                    model_name=config.model_name,
-                    prompt_version=signature.prompt_version,
-                )
                 fixed_count += 1
             except Exception as e_node:
+                # Mọi lỗi trong bulk repair phải được lưu lại, không chỉ in ra console.
+                db.rollback()
+                failed_node = db.query(NodeModel).filter(NodeModel.id == nid).first()
+                if failed_node:
+                    failed_node.status = "NEEDS_REVIEW"
+                    qa_repo.upsert_open_issue(
+                        project_id=project_id,
+                        node_id=nid,
+                        issue_type="QA_ERROR",
+                        severity="ERROR",
+                        message=f"QA bulk repair failed: {e_node}",
+                        source_snippet=(failed_node.content or "")[:150],
+                        translation_snippet=(failed_node.translated_content or "")[:150],
+                        suggested_fix="Kiểm tra provider và chạy lại repair; candidate chưa được coi là đạt.",
+                    )
                 print(f"[QA Bulk Fix] Error fixing node {nid}: {e_node}")
 
             # Broadcast SSE progress

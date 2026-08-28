@@ -16,6 +16,9 @@ def validate_qa_result(value: Any) -> Dict[str, Any]:
     """Chuẩn hóa contract QA và đóng lỗi khi schema không hợp lệ."""
     if not isinstance(value, dict):
         return qa_error("QA response không phải JSON object")
+    if value.get("status") == "ERROR" or value.get("error"):
+        # Không ghi đè chi tiết lỗi provider bằng lỗi schema chung chung.
+        return qa_error(str(value.get("error") or "QA provider trả về lỗi."))
     if not isinstance(value.get("is_passed"), bool):
         return qa_error("QA response thiếu is_passed hợp lệ")
     score = value.get("score")

@@ -49,7 +49,7 @@ class FlakyChineseProvider(MockProvider):
         return results
 
     def translate_single(self, text, system_prompt, glossary_terms=None, model=None, temperature=0.2):
-        return "Bản dịch đã được tự động sửa lại thành 100% tiếng Việt chuẩn không có chữ Hán."
+        return "Bản dịch đã được tự động sửa lại thành tiếng Việt chuẩn không có chữ Hán."
 
 
 def test_auto_retry_on_chinese_detection():
