@@ -211,6 +211,7 @@ export interface EntityDecision {
   source_key: string;
   preferred_translation: string;
   entity_type: string;
+  aliases?: string[];
   locked: boolean;
   occurrences: number;
   conflicts: number;

@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import ChapterModel, EntityDecisionModel, NodeModel
+from app.db.models import ChapterModel, NodeModel
 from app.models.canonical import DocumentNode, NodeStatus
 from app.services.translation.adaptive_chunker import AdaptiveSemanticChunker, SemanticChunk, TextSegment
 from app.services.translation.context_assembler import ContextAssembler, TranslationContext, estimate_tokens
@@ -77,11 +77,6 @@ class ContextualTranslationEngine:
         self.provider = provider
         self.config = config
         self.locked_glossary = dict(locked_glossary or {})
-        self.entity_decisions = {
-            item.source_key: item.preferred_translation
-            for item in self.db.query(EntityDecisionModel).filter_by(project_id=self.project_id).all()
-            if item.source_key.casefold() not in {key.casefold() for key in self.locked_glossary}
-        }
         self.event_callback = event_callback
         self.capabilities = provider.get_model_capabilities(config.model_name)
         self.effective_context_window = min(
@@ -212,7 +207,10 @@ class ContextualTranslationEngine:
             output_contract=contract,
             prompt_kind=prompt_kind,
             compact_system_prompt=self.compact_system_prompt,
-            entity_decisions=self.entity_decisions,
+            # Đọc ledger theo từng request để quyết định mới có hiệu lực ngay trong cùng engine.
+            entity_decisions=EntityLedgerService.relevant_decisions(
+                self.db, self.project_id, "\n".join(node.content or "" for node in nodes), self.locked_glossary,
+            ),
         )
         if context.trim_steps:
             self._emit("TRANSLATION_CONTEXT_TRIMMED", {

@@ -180,6 +180,15 @@ class GlossaryItemResponse(BaseModel):
     created_at: datetime
 
 
+# Entity ledger Schemas
+class EntityDecisionCreate(BaseModel):
+    source_key: str = Field(..., min_length=1, max_length=255)
+    preferred_translation: str = Field(..., min_length=1, max_length=255)
+    entity_type: str = Field(default="OTHER", min_length=1, max_length=32)
+    aliases: List[str] = Field(default_factory=list)
+    locked: bool = False
+
+
 # QA Schemas
 class QAIssueResponse(BaseModel):
     id: str

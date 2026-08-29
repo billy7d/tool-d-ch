@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 
+SEMANTIC_POLICY_VERSION = "semantic-policy-v1"
+
+
 @dataclass(frozen=True)
 class SemanticRiskResult:
     score: float
@@ -66,8 +69,15 @@ class SemanticRiskScorer:
             reasons.append("PREVIOUS_REPAIR")
         warnings = {str(item).upper() for item in (qa_warnings or [])}
         if warnings & {"NEGATION_RISK", "LENGTH_ANOMALY"}:
-            value += 0.16
             reasons.append("QA_WARNING")
+        # NEGATION_RISK là cảnh báo ngữ nghĩa nhạy cảm: phải đủ đẩy câu ngắn
+        # lên MEDIUM để không bị bỏ qua chỉ vì critic wiring bị thiếu.
+        if "NEGATION_RISK" in warnings:
+            value += 0.30
+            reasons.append("QA_WARNING_NEGATION_RISK")
+        if "LENGTH_ANOMALY" in warnings:
+            value += 0.16
+            reasons.append("QA_WARNING_LENGTH_ANOMALY")
         if entity_count >= 3:
             value += 0.10
             reasons.append("ENTITY_DENSITY")

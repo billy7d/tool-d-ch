@@ -9,10 +9,11 @@ from app.services.qa.semantic_critic import (
     SemanticCritic,
     semantic_signature,
 )
-from app.services.translation.semantic_risk import SemanticRiskScorer
+from app.services.translation.semantic_risk import SEMANTIC_POLICY_VERSION, SemanticRiskScorer
 from app.services.translation.entity_ledger import EntityLedgerService
 from app.services.translation.translation_commit import TranslationCommitService
 from app.services.translation.term_matcher import TermMatcher
+from app.services.translation.quality_gate import TranslationQualityGate
 
 
 SEMANTIC_REPAIR_PROMPT_VERSION = "semantic-repair-v1"
@@ -45,6 +46,20 @@ class SemanticAssuranceResult:
 
 
 class SemanticAssuranceService:
+    @staticmethod
+    def semantic_policy(engine, max_repairs: int, warning_codes=None) -> Dict[str, Any]:
+        """Trả về policy ổn định để mọi semantic cache dùng cùng một identity."""
+        policy = {
+            "version": SEMANTIC_POLICY_VERSION,
+            "risk_medium": float(getattr(engine.config, "semantic_risk_medium", SemanticRiskScorer.MEDIUM_THRESHOLD)),
+            "risk_high": float(getattr(engine.config, "semantic_risk_high", SemanticRiskScorer.HIGH_THRESHOLD)),
+            # Ghi cả policy cấu hình để đổi giới hạn sửa cũng làm cache miss.
+            "max_repairs": int(getattr(engine.config, "semantic_max_repairs", max_repairs)),
+        }
+        if warning_codes:
+            policy["quality_warnings"] = sorted({str(code).upper() for code in warning_codes})
+        return policy
+
     @classmethod
     def invalidate_for_nodes(cls, db, project_id: str, node_ids) -> int:
         ids = list(dict.fromkeys(node_ids or []))
@@ -81,6 +96,7 @@ class SemanticAssuranceService:
                 node.content, translated_text, engine.locked_glossary, entity_context,
                 engine.config.semantic_critic_model or engine.config.model_name,
                 engine.config.document_type,
+                cls.semantic_policy(engine, engine.config.semantic_max_repairs),
             )
             rejected = SemanticAssuranceResult(
                 translated_text, False, "FAIL", 1.0, "HIGH",
@@ -108,22 +124,41 @@ class SemanticAssuranceService:
 
     @classmethod
     def evaluate_candidate(cls, engine, chapter, node, translated_text: str, entity_context: Dict[str, str], previous_repairs: int = 0, max_repairs: int = 2) -> SemanticAssuranceResult:
+        quality_gate = TranslationQualityGate()
+        quality = quality_gate.validate(
+            node.content, translated_text, engine.locked_glossary or {},
+        )
+        warning_codes = [
+            issue["code"] for issue in quality.issues
+            if issue.get("severity") == "WARNING"
+        ]
         risk = SemanticRiskScorer.score(
             node.content, translated_text, getattr(node.type, "value", node.type), engine.config.document_type,
             previous_repairs=previous_repairs, entity_count=len(entity_context),
+            qa_warnings=warning_codes,
             medium_threshold=engine.config.semantic_risk_medium,
             high_threshold=engine.config.semantic_risk_high,
         )
+        policy = cls.semantic_policy(engine, max_repairs, warning_codes)
         signature = semantic_signature(
             node.content, translated_text, engine.locked_glossary, entity_context,
             engine.config.semantic_critic_model or engine.config.model_name, engine.config.document_type,
+            policy,
         )
+        if not quality.passed and not risk.requires_critic:
+            # Deterministic ERROR luôn fail-closed, không được semantic PASS hóa.
+            return SemanticAssuranceResult(
+                translated_text, False, "FAIL", risk.score, risk.level,
+                [{"type": issue["code"], "severity": issue["severity"], "message": issue["message"]} for issue in quality.issues],
+                signature,
+            )
+        # Không dùng semantic cache cho candidate đang fail deterministic gate.
         cached = engine.db.query(SemanticReviewModel).filter(
             SemanticReviewModel.project_id == engine.project_id,
             SemanticReviewModel.node_id == node.id,
             SemanticReviewModel.signature == signature,
             SemanticReviewModel.is_stale.is_(False),
-        ).first()
+        ).first() if quality.passed else None
         if cached:
             return SemanticAssuranceResult(
                 translated_text, cached.critic_status in {"PASS", "NOT_REQUIRED"}, cached.critic_status, cached.risk_score, cached.risk_level,
@@ -138,6 +173,17 @@ class SemanticAssuranceService:
         total_tokens = 0
         total_latency = 0.0
         for repair_index in range(max_repairs + 1):
+            candidate_quality = quality_gate.validate(
+                node.content, candidate, engine.locked_glossary or {},
+            )
+            candidate_warning_codes = [
+                issue["code"] for issue in candidate_quality.issues
+                if issue.get("severity") == "WARNING"
+            ]
+            candidate_errors = [
+                {"type": issue["code"], "severity": issue["severity"], "message": issue["message"]}
+                for issue in candidate_quality.issues
+            ]
             review = SemanticCritic.review(
                 engine.provider, node.content, candidate, engine.locked_glossary,
                 entity_context, engine.config.document_type, engine.config.semantic_critic_model or engine.config.model_name,
@@ -148,21 +194,26 @@ class SemanticAssuranceService:
             current_signature = semantic_signature(
                 node.content, candidate, engine.locked_glossary, entity_context,
                 engine.config.semantic_critic_model or engine.config.model_name, engine.config.document_type,
+                cls.semantic_policy(engine, max_repairs, candidate_warning_codes),
             )
-            if review.status == "PASS":
+            if review.status == "PASS" and candidate_quality.passed:
                 return SemanticAssuranceResult(
                     candidate, True, "PASS", risk.score, risk.level, [], current_signature,
                     review.score, repair_index, total_calls, total_tokens, total_latency,
                 )
+            diagnostics = list(candidate_errors) if not candidate_quality.passed else []
+            if review.status != "PASS":
+                diagnostics.extend(review.errors)
             if review.status == "ERROR" or repair_index >= max_repairs:
                 return SemanticAssuranceResult(
-                    candidate, False, review.status, risk.score, risk.level, review.errors, current_signature,
+                    candidate, False, "FAIL" if not candidate_quality.passed else review.status, risk.score, risk.level,
+                    diagnostics, current_signature,
                     review.score, repair_index, total_calls, total_tokens, total_latency,
                 )
             repair_issues = [{
                 "code": "SEMANTIC_REPAIR_POLICY",
                 "message": f"PROMPT VERSION {SEMANTIC_REPAIR_PROMPT_VERSION}: sửa từ ORIGINAL SOURCE; candidate cũ chỉ dùng chẩn đoán.",
-            }] + [{"code": item["type"], "message": item["message"]} for item in review.errors]
+            }] + [{"code": item["type"], "message": item["message"]} for item in diagnostics]
             repaired = engine.repair_node(chapter, node, repair_issues, max_attempts=1)
             if not repaired.passed:
                 return SemanticAssuranceResult(

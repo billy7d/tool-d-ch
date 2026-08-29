@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from app.services.qa.semantic_issue_types import normalize_semantic_issue_type, semantic_severity
 from app.services.translation.context_assembler import estimate_tokens
+from app.services.translation.semantic_risk import SEMANTIC_POLICY_VERSION, SemanticRiskScorer
 
 
 SEMANTIC_CRITIC_PROMPT_VERSION = "semantic-critic-v1"
@@ -24,11 +25,25 @@ class SemanticCriticResult:
     critic_calls: int = 1
 
 
-def semantic_signature(source_text: str, translated_text: str, glossary: Dict[str, str], entities: Dict[str, str], model: str, document_type: str) -> str:
+def semantic_signature(
+    source_text: str,
+    translated_text: str,
+    glossary: Dict[str, str],
+    entities: Dict[str, str],
+    model: str,
+    document_type: str,
+    policy: Optional[Dict[str, Any]] = None,
+) -> str:
+    selected_policy = dict(policy or {
+        "version": SEMANTIC_POLICY_VERSION,
+        "risk_medium": SemanticRiskScorer.MEDIUM_THRESHOLD,
+        "risk_high": SemanticRiskScorer.HIGH_THRESHOLD,
+        "max_repairs": 2,
+    })
     payload = {
         "source": source_text, "translation": translated_text, "glossary": glossary,
         "entities": entities, "prompt_version": SEMANTIC_CRITIC_PROMPT_VERSION,
-        "model": model, "document_type": document_type,
+        "model": model, "document_type": document_type, "policy": selected_policy,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 

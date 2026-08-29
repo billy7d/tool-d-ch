@@ -57,6 +57,12 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
   const [consistencyIssues, setConsistencyIssues] = useState<any[]>([]);
   const [semanticBusy, setSemanticBusy] = useState(false);
   const [semanticFilter, setSemanticFilter] = useState<'ALL' | 'HIGH' | 'FAIL' | 'ERROR' | 'NEEDS_REVIEW'>('ALL');
+  const [showEntityForm, setShowEntityForm] = useState(false);
+  const [entityForm, setEntityForm] = useState({
+    source_key: '', preferred_translation: '', entity_type: 'OTHER', aliases: '', locked: false,
+  });
+  const [entityError, setEntityError] = useState('');
+  const [entitySaving, setEntitySaving] = useState(false);
 
   const fetchData = async () => {
     try {
@@ -297,6 +303,42 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
     setEntities(await apiClient.getEntities(project.id));
   };
 
+  const entityErrorMessage = (error: any) => {
+    const detail = error?.response?.data?.detail;
+    const code = typeof detail === 'object' ? detail?.code : '';
+    const messages: Record<string, string> = {
+      ENTITY_ALREADY_EXISTS: 'Entity này đã tồn tại; hãy chỉnh sửa dòng hiện có.',
+      ENTITY_GLOSSARY_CONFLICT: 'Entity xung đột với thuật ngữ khóa trong Glossary.',
+      INVALID_ENTITY_TYPE: 'Loại entity không hợp lệ.',
+      INVALID_ENTITY: 'Source và bản dịch entity không được rỗng.',
+    };
+    if (messages[code]) return messages[code];
+    if (error?.response?.status === 422) return 'Dữ liệu entity chưa hợp lệ.';
+    return typeof detail === 'string' ? detail : 'Không thể tạo entity.';
+  };
+
+  const handleCreateEntity = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setEntitySaving(true);
+    setEntityError('');
+    try {
+      await apiClient.createEntity(project.id, {
+        source_key: entityForm.source_key.trim(),
+        preferred_translation: entityForm.preferred_translation.trim(),
+        entity_type: entityForm.entity_type,
+        aliases: entityForm.aliases.split(',').map((item) => item.trim()).filter(Boolean),
+        locked: entityForm.locked,
+      });
+      setEntities(await apiClient.getEntities(project.id));
+      setEntityForm({ source_key: '', preferred_translation: '', entity_type: 'OTHER', aliases: '', locked: false });
+      setShowEntityForm(false);
+    } catch (error) {
+      setEntityError(entityErrorMessage(error));
+    } finally {
+      setEntitySaving(false);
+    }
+  };
+
   return (
     <div className="h-[calc(100vh-7.5rem)] flex flex-col">
       {/* Top action toolbar */}
@@ -389,7 +431,25 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
         </section>
 
         <section className="rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-3 text-xs overflow-x-auto">
-          <div className="font-semibold text-emerald-300 mb-2">Entity Decisions ({entities.length})</div>
+          <div className="flex items-center justify-between font-semibold text-emerald-300 mb-2">
+            <span>Entity Decisions ({entities.length})</span>
+            <button onClick={() => { setShowEntityForm((value) => !value); setEntityError(''); }} className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-200">
+              {showEntityForm ? 'Đóng' : 'Tạo entity'}
+            </button>
+          </div>
+          {showEntityForm && (
+            <form onSubmit={handleCreateEntity} className="mb-3 space-y-1.5 border-b border-emerald-950 pb-3">
+              <input required value={entityForm.source_key} onChange={(event) => setEntityForm({ ...entityForm, source_key: event.target.value })} placeholder="Source Entity" className="w-full bg-slate-950 rounded px-2 py-1" />
+              <input required value={entityForm.preferred_translation} onChange={(event) => setEntityForm({ ...entityForm, preferred_translation: event.target.value })} placeholder="Bản dịch ưu tiên" className="w-full bg-slate-950 rounded px-2 py-1" />
+              <select value={entityForm.entity_type} onChange={(event) => setEntityForm({ ...entityForm, entity_type: event.target.value })} className="w-full bg-slate-950 rounded px-2 py-1">
+                {['PERSON', 'ORGANIZATION', 'PRODUCT', 'LOCATION', 'ACRONYM', 'TECHNICAL_IDENTIFIER', 'OTHER'].map((type) => <option key={type} value={type}>{type}</option>)}
+              </select>
+              <input value={entityForm.aliases} onChange={(event) => setEntityForm({ ...entityForm, aliases: event.target.value })} placeholder="Aliases, phân cách bằng dấu phẩy" className="w-full bg-slate-950 rounded px-2 py-1" />
+              <label className="flex items-center gap-1 text-emerald-200"><input type="checkbox" checked={entityForm.locked} onChange={(event) => setEntityForm({ ...entityForm, locked: event.target.checked })} /> Khóa quyết định</label>
+              {entityError && <div className="text-rose-300">{entityError}</div>}
+              <button type="submit" disabled={entitySaving} className="px-2 py-1 rounded bg-emerald-500/30 text-emerald-100">{entitySaving ? 'Đang lưu...' : 'Lưu entity'}</button>
+            </form>
+          )}
           {entities.length === 0 ? <div className="text-slate-500">Chưa có quyết định entity.</div> : (
             <table className="w-full text-left text-[10px] text-slate-300">
               <thead><tr className="text-slate-500"><th>Nguồn</th><th>Bản dịch ưu tiên</th><th>Loại</th><th>Lần/Xung đột</th><th>Khóa</th></tr></thead>

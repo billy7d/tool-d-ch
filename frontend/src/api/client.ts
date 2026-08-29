@@ -105,6 +105,13 @@ export const apiClient = {
     api.post(`/projects/${projectId}/qa/global-consistency`).then((r) => r.data),
   getEntities: (projectId: string) =>
     api.get<EntityDecision[]>(`/projects/${projectId}/entities`).then((r) => r.data),
+  createEntity: (projectId: string, data: {
+    source_key: string;
+    preferred_translation: string;
+    entity_type: string;
+    aliases: string[];
+    locked: boolean;
+  }) => api.post<EntityDecision>(`/projects/${projectId}/entities`, data).then((r) => r.data),
   updateEntity: (projectId: string, entityId: string, data: Partial<EntityDecision>) =>
     api.patch(`/projects/${projectId}/entities/${entityId}`, data).then((r) => r.data),
 
