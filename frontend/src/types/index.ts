@@ -159,6 +159,11 @@ export interface TranslationPreviewSample {
   quality: {
     passed: boolean;
     issues: Array<{ code: string; severity: string; message: string }>;
+    naturalness?: {
+      status: string;
+      score?: number;
+      issues: Array<{ type: string; severity: string; message: string }>;
+    };
   };
 }
 

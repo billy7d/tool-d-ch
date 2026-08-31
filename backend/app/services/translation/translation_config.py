@@ -20,6 +20,10 @@ class TranslationConfig:
     semantic_risk_high: float = 0.65
     semantic_max_repairs: int = 2
     semantic_critic_model: Optional[str] = None
+    naturalness_critic_model: Optional[str] = None
+    naturalness_pass_threshold: float = 0.80
+    naturalness_rewrite_threshold: float = 0.55
+    editorial_max_rewrites: int = 1
 
     @classmethod
     def from_project(
@@ -51,6 +55,12 @@ class TranslationConfig:
         custom_value = custom_instruction_override
         if custom_value is None:
             custom_value = getattr(project, "custom_instructions", None)
+        naturalness_pass_threshold = float(style_guide.get("naturalness_pass_threshold", 0.80))
+        naturalness_rewrite_threshold = float(style_guide.get("naturalness_rewrite_threshold", 0.55))
+        if not 0.0 <= naturalness_pass_threshold <= 1.0:
+            naturalness_pass_threshold = 0.80
+        if not 0.0 <= naturalness_rewrite_threshold < naturalness_pass_threshold:
+            naturalness_rewrite_threshold = min(0.55, max(0.0, naturalness_pass_threshold - 0.01))
         return cls(
             source_language=str(getattr(project, "source_language", None) or "en"),
             target_language=str(getattr(project, "target_language", None) or "vi"),
@@ -66,6 +76,10 @@ class TranslationConfig:
             semantic_risk_high=float(style_guide.get("semantic_risk_high", 0.65)),
             semantic_max_repairs=max(0, min(2, int(style_guide.get("semantic_max_repairs", 2)))),
             semantic_critic_model=str(style_guide.get("semantic_critic_model") or model_override or getattr(project, "selected_model", None) or "qwen2.5:7b"),
+            naturalness_critic_model=str(style_guide.get("naturalness_critic_model") or model_override or getattr(project, "selected_model", None) or "qwen2.5:7b"),
+            naturalness_pass_threshold=naturalness_pass_threshold,
+            naturalness_rewrite_threshold=naturalness_rewrite_threshold,
+            editorial_max_rewrites=max(0, min(1, int(style_guide.get("editorial_max_rewrites", 1)))),
         )
 
     def signature_payload(self) -> Dict[str, Any]:
@@ -84,4 +98,8 @@ class TranslationConfig:
             "semantic_risk_high": self.semantic_risk_high,
             "semantic_max_repairs": self.semantic_max_repairs,
             "semantic_critic_model": self.semantic_critic_model,
+            "naturalness_critic_model": self.naturalness_critic_model,
+            "naturalness_pass_threshold": self.naturalness_pass_threshold,
+            "naturalness_rewrite_threshold": self.naturalness_rewrite_threshold,
+            "editorial_max_rewrites": self.editorial_max_rewrites,
         }

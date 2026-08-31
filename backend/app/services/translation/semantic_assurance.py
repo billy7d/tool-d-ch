@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
 import uuid
@@ -11,7 +11,6 @@ from app.services.qa.semantic_critic import (
 )
 from app.services.translation.semantic_risk import SEMANTIC_POLICY_VERSION, SemanticRiskScorer
 from app.services.translation.entity_ledger import EntityLedgerService
-from app.services.translation.translation_commit import TranslationCommitService
 from app.services.translation.term_matcher import TermMatcher
 from app.services.translation.quality_gate import TranslationQualityGate
 
@@ -34,6 +33,15 @@ class SemanticAssuranceResult:
     critic_request_tokens: int = 0
     critic_latency_ms: float = 0.0
     from_cache: bool = False
+    naturalness_status: str = "NOT_RUN"
+    naturalness_score: float | None = None
+    naturalness_issues: list[Dict[str, Any]] = field(default_factory=list)
+    naturalness_checks: Dict[str, str] = field(default_factory=dict)
+    naturalness_critic_calls: int = 0
+    naturalness_latency_ms: float = 0.0
+    editorial_rewrite_count: int = 0
+    editorial_rewrite_success: bool = False
+    publication_status: str = "NOT_EVALUATED"
 
     def audit_payload(self, model_name: str) -> Dict[str, Any]:
         return {
@@ -42,6 +50,11 @@ class SemanticAssuranceResult:
             "model_name": model_name, "prompt_version": SEMANTIC_CRITIC_PROMPT_VERSION,
             "critic_calls": self.critic_calls, "critic_request_tokens": self.critic_request_tokens,
             "critic_latency_ms": self.critic_latency_ms,
+            "naturalness_status": self.naturalness_status, "naturalness_score": self.naturalness_score,
+            "naturalness_critic_calls": self.naturalness_critic_calls,
+            "naturalness_latency_ms": self.naturalness_latency_ms,
+            "editorial_rewrite_count": self.editorial_rewrite_count,
+            "editorial_rewrite_success": self.editorial_rewrite_success,
         }
 
 
@@ -85,45 +98,35 @@ class SemanticAssuranceService:
         created_by: str, instruction: str | None = None,
         resolved_issue_ids=None, latency_ms: float = 0.0, previous_repairs: int = 0,
     ) -> SemanticAssuranceResult:
-        entity_context = EntityLedgerService.relevant_decisions(
-            engine.db, engine.project_id, node.content, engine.locked_glossary,
-        )
-        locked_issues = EntityLedgerService.validate_locked(
-            engine.db, engine.project_id, node.content, translated_text, engine.locked_glossary,
-        )
-        if locked_issues:
-            signature_value = semantic_signature(
-                node.content, translated_text, engine.locked_glossary, entity_context,
-                engine.config.semantic_critic_model or engine.config.model_name,
-                engine.config.document_type,
-                cls.semantic_policy(engine, engine.config.semantic_max_repairs),
-            )
-            rejected = SemanticAssuranceResult(
-                translated_text, False, "FAIL", 1.0, "HIGH",
-                [{"type": item["code"], "severity": item["severity"], "message": item["message"]} for item in locked_issues],
-                signature_value,
-            )
-            cls.persist_rejected(engine.db, engine.project_id, node, rejected, model_name)
-            return rejected
-        result = cls.evaluate_candidate(
-            engine, chapter, engine.canonical_node(node), translated_text, entity_context,
-            previous_repairs=previous_repairs,
-            max_repairs=engine.config.semantic_max_repairs,
-        )
-        if not result.approved:
-            cls.persist_rejected(engine.db, engine.project_id, node, result, model_name)
-            return result
-        TranslationCommitService.commit_validated_translation(
-            engine.db, engine.project_id, node, result.translated_text, signature,
-            engine.locked_glossary, model_name, created_by, instruction=instruction,
+        # Lazy import để semantic evaluator và publication orchestrator không tạo vòng import.
+        from app.services.translation.vietnamese_editorial_assurance import TranslationPublicationAssuranceService
+
+        return TranslationPublicationAssuranceService.assure_and_commit(
+            engine=engine,
+            chapter=chapter,
+            node=node,
+            translated_text=translated_text,
+            signature=signature,
+            model_name=model_name,
+            created_by=created_by,
+            instruction=instruction,
             resolved_issue_ids=resolved_issue_ids,
-            semantic_result=result.audit_payload(engine.config.semantic_critic_model or model_name),
             latency_ms=latency_ms,
+            previous_repairs=previous_repairs,
         )
-        return result
 
     @classmethod
-    def evaluate_candidate(cls, engine, chapter, node, translated_text: str, entity_context: Dict[str, str], previous_repairs: int = 0, max_repairs: int = 2) -> SemanticAssuranceResult:
+    def evaluate_candidate(
+        cls,
+        engine,
+        chapter,
+        node,
+        translated_text: str,
+        entity_context: Dict[str, str],
+        previous_repairs: int = 0,
+        max_repairs: int = 2,
+        force_critic: bool = False,
+    ) -> SemanticAssuranceResult:
         quality_gate = TranslationQualityGate()
         quality = quality_gate.validate(
             node.content, translated_text, engine.locked_glossary or {},
@@ -145,7 +148,7 @@ class SemanticAssuranceService:
             engine.config.semantic_critic_model or engine.config.model_name, engine.config.document_type,
             policy,
         )
-        if not quality.passed and not risk.requires_critic:
+        if not quality.passed and not risk.requires_critic and not force_critic:
             # Deterministic ERROR luôn fail-closed, không được semantic PASS hóa.
             return SemanticAssuranceResult(
                 translated_text, False, "FAIL", risk.score, risk.level,
@@ -159,13 +162,13 @@ class SemanticAssuranceService:
             SemanticReviewModel.signature == signature,
             SemanticReviewModel.is_stale.is_(False),
         ).first() if quality.passed else None
-        if cached:
+        if cached and not force_critic:
             return SemanticAssuranceResult(
                 translated_text, cached.critic_status in {"PASS", "NOT_REQUIRED"}, cached.critic_status, cached.risk_score, cached.risk_level,
                 list(cached.issues_json or []), signature, cached.critic_score,
                 critic_calls=0, from_cache=True,
             )
-        if not risk.requires_critic:
+        if not risk.requires_critic and not force_critic:
             return SemanticAssuranceResult(translated_text, True, "NOT_REQUIRED", risk.score, risk.level, [], signature)
 
         candidate = translated_text

@@ -135,10 +135,10 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
 
   const handleRunQA = async () => {
     try {
-      const res = await apiClient.runQA(project.id, false);
+      const res = await apiClient.runQA(project.id, false, true);
       const issues = await apiClient.getQAIssues(project.id);
       setQaIssues(issues);
-      alert(`Đã kiểm tra xong: ${res.total_issues} cảnh báo.`);
+      alert(`Đã kiểm tra xong: ${res.total_issues} cảnh báo (naturalness: ${res.naturalness_failed ?? 0} đoạn cần xem).`);
     } catch (e) {
       alert('Lỗi kiểm tra QA: ' + e);
     }
@@ -211,7 +211,7 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
       }
 
       // Re-run QA scan to update warnings
-      const qaRes = await apiClient.runQA(project.id, false);
+      const qaRes = await apiClient.runQA(project.id, false, true);
       const updatedIssues = await apiClient.getQAIssues(project.id);
       setQaIssues(updatedIssues);
 

@@ -149,6 +149,12 @@ class TranslationStatusResponse(BaseModel):
     context_mode: Optional[str] = None
     retry_count: int = 0
     quality_state: Optional[str] = None
+    naturalness_score: Optional[float] = None
+    naturalness_status: Optional[str] = None
+    naturalness_critic_calls: int = 0
+    naturalness_latency_ms: float = 0.0
+    editorial_rewrite_count: int = 0
+    editorial_rewrite_success: bool = False
     execution_status: str = "IDLE"
     document_status: str = "TRANSLATION_CONFIGURED"
 

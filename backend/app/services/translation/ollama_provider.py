@@ -384,3 +384,107 @@ class OllamaProvider(TranslationProvider):
         if response.status_code != 200:
             raise RuntimeError(f"Ollama semantic critic HTTP {response.status_code}: {response.text[:200]}")
         return json.loads(response.json().get("message", {}).get("content", ""))
+
+    def review_naturalness(
+        self,
+        source_text: str,
+        translated_text: str,
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        previous_context: Any = None,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_model = model or self.default_model
+        system_message = (
+            "You are a Vietnamese naturalness critic for an English-to-Vietnamese translation. "
+            "Judge Vietnamese quality only. Do not rewrite the sentence and do not penalize a faithful "
+            "non-literal translation. Ask whether the Vietnamese would read as natural writing by a Vietnamese "
+            "author in the stated domain when the English source is hidden. Check literal calques, English word "
+            "order, collocation, cohesion, pronoun/reference, register, redundancy, nominalization, unnecessary "
+            "passive voice and sentence flow. Formal legal, technical and academic style is acceptable when it is "
+            "appropriate and semantically precise. Return strict JSON only with status PASS or FAIL, score 0..1, "
+            "the ten required checks, and issues. Each issue must contain type, severity, target_span and message."
+        )
+        user_message = json.dumps({
+            "source": source_text,
+            "vietnamese_translation": translated_text,
+            "document_type": document_type,
+            "register": register,
+            "sentence_style": sentence_style,
+            "previous_bilingual_context": previous_context or [],
+            "relevant_glossary": glossary_terms or {},
+            "relevant_entities": entity_context or {},
+            "required_check_names": [
+                "literal_calque", "word_order", "collocation", "cohesion", "pronoun_reference",
+                "register", "redundancy", "nominalization", "passive_voice", "sentence_flow",
+            ],
+        }, ensure_ascii=False)
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "format": "json",
+            "stream": False,
+            "keep_alive": "60m",
+            "options": {"temperature": 0.0, "num_ctx": self.effective_context_window(target_model)},
+        }
+        response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
+        if response.status_code != 200:
+            raise RuntimeError(f"Ollama naturalness critic HTTP {response.status_code}: {response.text[:200]}")
+        return json.loads(response.json().get("message", {}).get("content", ""))
+
+    def editorial_rewrite(
+        self,
+        source_text: str,
+        current_translation: str,
+        naturalness_issues: List[Dict[str, Any]],
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        target_model = model or self.default_model
+        system_message = (
+            "You are a careful Vietnamese editorial translator. Edit the Vietnamese, not the meaning. "
+            "Return only the revised Vietnamese plain text, with no JSON, notes or markdown. Keep every proposition "
+            "from ORIGINAL SOURCE. Do not add or omit information, change numbers, negation, modality, causality, "
+            "scope, conditions, entities, references or locked terminology. Do not invent a new interpretation. "
+            "Only improve Vietnamese syntax, collocation, cohesion, pronouns and unnecessary literal phrasing. "
+            "Respect the document domain, register and sentence style."
+        )
+        user_message = json.dumps({
+            "ORIGINAL_SOURCE": source_text,
+            "CURRENT_VIETNAMESE_TRANSLATION": current_translation,
+            "NATURALNESS_ISSUES": naturalness_issues,
+            "DOCUMENT_TYPE": document_type,
+            "REGISTER": register,
+            "SENTENCE_STYLE": sentence_style,
+            "LOCKED_GLOSSARY": glossary_terms or {},
+            "RELEVANT_ENTITIES": entity_context or {},
+            "INSTRUCTION": "Edit the Vietnamese, not the meaning.",
+        }, ensure_ascii=False)
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "stream": False,
+            "keep_alive": "60m",
+            "options": {"temperature": 0.1, "num_ctx": self.effective_context_window(target_model)},
+        }
+        response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
+        if response.status_code != 200:
+            raise RuntimeError(f"Ollama editorial rewrite HTTP {response.status_code}: {response.text[:200]}")
+        content = response.json().get("message", {}).get("content", "").strip()
+        if content.startswith("```") and content.endswith("```"):
+            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content).strip()
+        return content

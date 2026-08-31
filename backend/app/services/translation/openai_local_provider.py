@@ -282,3 +282,99 @@ class OpenAILocalProvider(TranslationProvider):
         if response.status_code != 200:
             raise RuntimeError(f"OpenAI Local semantic critic HTTP {response.status_code}: {response.text[:200]}")
         return json.loads(response.json()["choices"][0]["message"]["content"])
+
+    def review_naturalness(
+        self,
+        source_text: str,
+        translated_text: str,
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        previous_context: Any = None,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_model = model or self.default_model
+        system_message = (
+            "You are a Vietnamese naturalness critic for an English-to-Vietnamese translation. Judge Vietnamese "
+            "quality only and do not rewrite. Accept faithful non-literal Vietnamese. Check literal_calque, "
+            "word_order, collocation, cohesion, pronoun_reference, register, redundancy, nominalization, "
+            "passive_voice and sentence_flow. Do not penalize appropriate formal legal, technical or academic "
+            "style. Return strict JSON only with status PASS or FAIL, score 0..1, all ten checks, and issues "
+            "containing type, severity, target_span and message."
+        )
+        user_message = json.dumps({
+            "source": source_text,
+            "vietnamese_translation": translated_text,
+            "document_type": document_type,
+            "register": register,
+            "sentence_style": sentence_style,
+            "previous_bilingual_context": previous_context or [],
+            "relevant_glossary": glossary_terms or {},
+            "relevant_entities": entity_context or {},
+        }, ensure_ascii=False)
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+        }
+        response = self.session.post(
+            f"{self.base_url}/chat/completions", headers=self._headers(), json=payload, timeout=60.0,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"OpenAI Local naturalness critic HTTP {response.status_code}: {response.text[:200]}")
+        return json.loads(response.json()["choices"][0]["message"]["content"])
+
+    def editorial_rewrite(
+        self,
+        source_text: str,
+        current_translation: str,
+        naturalness_issues: List[Dict[str, Any]],
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        target_model = model or self.default_model
+        system_message = (
+            "You are a careful Vietnamese editorial translator. Edit the Vietnamese, not the meaning. Return "
+            "only revised Vietnamese plain text. Keep every proposition, number, negation, modality, causality, "
+            "condition, scope, entity, reference and locked term from the original source. Do not add, omit or "
+            "reinterpret information. Only improve syntax, collocation, cohesion, pronouns and literal phrasing."
+        )
+        user_message = json.dumps({
+            "ORIGINAL_SOURCE": source_text,
+            "CURRENT_VIETNAMESE_TRANSLATION": current_translation,
+            "NATURALNESS_ISSUES": naturalness_issues,
+            "DOCUMENT_TYPE": document_type,
+            "REGISTER": register,
+            "SENTENCE_STYLE": sentence_style,
+            "LOCKED_GLOSSARY": glossary_terms or {},
+            "RELEVANT_ENTITIES": entity_context or {},
+            "INSTRUCTION": "Edit the Vietnamese, not the meaning.",
+        }, ensure_ascii=False)
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "temperature": 0.1,
+        }
+        response = self.session.post(
+            f"{self.base_url}/chat/completions", headers=self._headers(), json=payload, timeout=60.0,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"OpenAI Local editorial rewrite HTTP {response.status_code}: {response.text[:200]}")
+        content = response.json()["choices"][0]["message"]["content"].strip()
+        if content.startswith("```") and content.endswith("```"):
+            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content).strip()
+        return content

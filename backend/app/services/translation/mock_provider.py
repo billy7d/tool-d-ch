@@ -169,3 +169,133 @@ class MockProvider(TranslationProvider):
             "errors": [{"type": issue_type, "severity": "ERROR", "source_span": "", "target_span": "", "message": "Lỗi semantic được gieo trong fixture."}],
             "checks": checks,
         }
+
+    def review_naturalness(
+        self,
+        source_text: str,
+        translated_text: str,
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        previous_context: Any = None,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Mock critic có các tín hiệu ổn định để test ranking và editorial flow offline."""
+        checks = {key: "PASS" for key in (
+            "literal_calque", "word_order", "collocation", "cohesion", "pronoun_reference",
+            "register", "redundancy", "nominalization", "passive_voice", "sentence_flow",
+        )}
+        target = translated_text or ""
+        lowered = target.lower()
+        issues = []
+        if "[[NATURALNESS_ERROR]]" in target:
+            raise RuntimeError("mock naturalness critic failure")
+        if "[[NATURALNESS_LOW]]" in target:
+            checks["sentence_flow"] = "FAIL"
+            issues.append({
+                "type": "SENTENCE_FLOW", "severity": "WARNING", "target_span": "[[NATURALNESS_LOW]]",
+                "message": "Câu vẫn khó đọc trong ngữ cảnh tiếng Việt.",
+            })
+            return {"status": "FAIL", "score": 0.42, "checks": checks, "issues": issues}
+
+        literal_patterns = {
+            "đưa ra quyết định": ("collocation", "COLLOCATION", "Cụm từ này là collocation dịch sát, dư thừa trong tiếng Việt."),
+            "một quyết định": ("collocation", "COLLOCATION", "Cụm danh từ này có thể diễn đạt bằng động từ tự nhiên hơn."),
+            "thực hiện hành động": ("literal_calque", "LITERAL_CALQUE", "Cách ghép động từ còn mang dấu vết dịch từng từ."),
+            "các bước để": ("word_order", "WORD_ORDER", "Trật tự và cách chọn danh từ còn bám cấu trúc tiếng Anh."),
+            "tiến hành việc": ("redundancy", "REDUNDANCY", "Cụm từ rườm rà, không cần thiết trong câu này."),
+            "được phê duyệt bởi": ("passive_voice", "PASSIVE_VOICE", "Bị động theo trật tự tiếng Anh chưa tự nhiên trong văn cảnh này."),
+            "được công bố bởi": ("passive_voice", "PASSIVE_VOICE", "Bị động theo trật tự tiếng Anh chưa tự nhiên trong văn cảnh này."),
+            "được ký bởi": ("passive_voice", "PASSIVE_VOICE", "Bị động theo trật tự tiếng Anh chưa tự nhiên trong văn cảnh này."),
+            "ngay lập tức": ("redundancy", "REDUNDANCY", "Có thể dùng trạng từ ngắn gọn hơn trong văn phong tự nhiên."),
+            "là dễ dàng để": ("word_order", "WORD_ORDER", "Cấu trúc tính từ còn theo trật tự tiếng Anh."),
+            "để có thể": ("redundancy", "REDUNDANCY", "Cụm mở đầu có thể rút gọn mà không mất nghĩa."),
+            "với sự tôn trọng đối với": ("literal_calque", "LITERAL_CALQUE", "Cụm giới từ bị dịch từng từ."),
+            "khác biệt từ những gì": ("collocation", "COLLOCATION", "Collocation này chưa tự nhiên trong tiếng Việt."),
+            "theo một cách": ("redundancy", "REDUNDANCY", "Cụm trạng ngữ có thể diễn đạt gọn hơn."),
+            "các sự ": ("nominalization", "NOMINALIZATION", "Danh từ hóa làm câu nặng và không tự nhiên."),
+            "được xây dựng thông qua": ("passive_voice", "PASSIVE_VOICE", "Cấu trúc bị động và giới từ còn mang dấu vết nguồn."),
+            "đang được tập trung vào việc": ("passive_voice", "PASSIVE_VOICE", "Cấu trúc bị động và danh từ hóa không cần thiết."),
+            "đã thực hiện việc tăng": ("nominalization", "NOMINALIZATION", "Danh từ hóa và động từ đệm làm câu nặng."),
+            "đã được giảm bởi": ("passive_voice", "PASSIVE_VOICE", "Có thể chuyển sang chủ động tự nhiên hơn."),
+            "được cải thiện khi các chi phí": ("passive_voice", "PASSIVE_VOICE", "Cấu trúc bị động liên tiếp làm câu nặng."),
+            "một tổng quan của": ("collocation", "COLLOCATION", "Collocation này chưa phù hợp với tiếng Việt tự nhiên."),
+            "để xem xét lại": ("word_order", "WORD_ORDER", "Cách kết hợp động từ chưa tự nhiên."),
+            "làm một sự khác biệt": ("collocation", "COLLOCATION", "Cụm từ bị dịch sát từng thành phần."),
+            "thời hạn cuối cùng": ("redundancy", "REDUNDANCY", "Danh từ ghép bị kéo dài không cần thiết."),
+            "sau một sự xem xét": ("nominalization", "NOMINALIZATION", "Danh từ hóa có thể chuyển thành mệnh đề động từ."),
+            "dẫn đến trong": ("literal_calque", "LITERAL_CALQUE", "Cụm động từ chưa có collocation tiếng Việt tự nhiên."),
+            "một lợi nhuận": ("collocation", "COLLOCATION", "Danh từ không cần mạo từ dịch thành một trong câu này."),
+            "ở tại": ("word_order", "WORD_ORDER", "Giới từ bị dịch sát, không tự nhiên trong ngữ cảnh."),
+            "mặc dù sự": ("cohesion", "COHESION", "Cách danh từ hóa làm quan hệ câu nặng nề."),
+            "được chịu sự phụ thuộc": ("passive_voice", "PASSIVE_VOICE", "Cấu trúc bị động và danh từ hóa không cần thiết."),
+            "với rủi ro quá mức": ("collocation", "COLLOCATION", "Cụm từ chưa phải collocation tự nhiên."),
+            "một biên độ": ("collocation", "COLLOCATION", "Thuật ngữ tài chính không nên dịch theo cấu trúc mạo từ này."),
+            "một sự nghỉ ngơi": ("nominalization", "NOMINALIZATION", "Có thể dùng động từ trực tiếp thay cho danh từ hóa."),
+            "là bình thường để": ("word_order", "WORD_ORDER", "Cấu trúc vị ngữ còn theo tiếng Anh."),
+            "không phải để giải quyết": ("word_order", "WORD_ORDER", "Cấu trúc động từ còn theo tiếng Anh."),
+            "có thể dường như": ("redundancy", "REDUNDANCY", "Hai lớp mức độ làm câu rườm rà."),
+            "tạo ra một thói quen": ("collocation", "COLLOCATION", "Động từ và danh từ chưa kết hợp tự nhiên."),
+            "làm cho nó dễ dàng hơn để": ("word_order", "WORD_ORDER", "Cấu trúc gây khiến còn bám tiếng Anh."),
+            "sự nghi ngờ xuất hiện": ("cohesion", "COHESION", "Cách danh từ hóa chưa tự nhiên trong câu mở đầu."),
+            "là không hợp lệ": ("word_order", "WORD_ORDER", "Phủ định nên đặt trực tiếp trước tính từ."),
+            "là bị thiếu": ("word_order", "WORD_ORDER", "Cấu trúc bị động không cần thiết."),
+            "thực hiện một yêu cầu": ("collocation", "COLLOCATION", "Động từ đệm làm cụm kỹ thuật nặng."),
+            "trước khi nó": ("pronoun_reference", "PRONOUN_REFERENCE", "Đại từ lặp không cần thiết trong tiếng Việt."),
+            "các cuộc gọi mạng lặp lại": ("collocation", "COLLOCATION", "Cụm danh từ dài và bám trật tự tiếng Anh."),
+            "một sự giảm": ("nominalization", "NOMINALIZATION", "Danh từ hóa không cần thiết."),
+            "bằng cách sử dụng": ("redundancy", "REDUNDANCY", "Cụm phương thức có thể rút gọn."),
+            "được giải thích bởi": ("passive_voice", "PASSIVE_VOICE", "Bị động theo tiếng Anh chưa phù hợp ngữ cảnh."),
+            "lời giải thích được đề xuất": ("passive_voice", "PASSIVE_VOICE", "Cụm bị động có thể diễn đạt tự nhiên hơn."),
+            "được đưa vào trong tài khoản": ("literal_calque", "LITERAL_CALQUE", "Thành ngữ bị dịch từng từ."),
+            "tối ưu hóa của": ("word_order", "WORD_ORDER", "Cấu trúc sở hữu chưa tự nhiên."),
+            "theo sau chỉ nếu": ("word_order", "WORD_ORDER", "Trật tự mệnh đề điều kiện còn bám nguồn."),
+            "được thay đổi sau": ("passive_voice", "PASSIVE_VOICE", "Bị động không cần thiết trong mệnh đề này."),
+            "đồng ý với nó": ("pronoun_reference", "PRONOUN_REFERENCE", "Đại từ thay thế không tự nhiên trong tiếng Việt."),
+            "chỉ nếu thông báo bằng văn bản được cung cấp": ("word_order", "WORD_ORDER", "Mệnh đề điều kiện còn giữ trật tự tiếng Anh."),
+            "đã nói rằng cô ấy": ("pronoun_reference", "PRONOUN_REFERENCE", "Đại từ lặp làm câu văn nặng."),
+            "hầu như ở trên": ("literal_calque", "LITERAL_CALQUE", "Cụm miêu tả bị dịch sát thành ngữ."),
+            "được bao quanh bởi sự": ("passive_voice", "PASSIVE_VOICE", "Bị động và danh từ hóa làm câu thiếu tự nhiên."),
+        }
+        for phrase, (check, issue_type, message) in literal_patterns.items():
+            if phrase in lowered:
+                checks[check] = "FAIL"
+                issues.append({
+                    "type": issue_type, "severity": "WARNING", "target_span": phrase, "message": message,
+                })
+        if "[[NATURALNESS_FAIL]]" in target and not issues:
+            checks["literal_calque"] = "FAIL"
+            issues.append({
+                "type": "LITERAL_CALQUE", "severity": "WARNING", "target_span": "[[NATURALNESS_FAIL]]",
+                "message": "Mock fixture đánh dấu candidate dịch sát.",
+            })
+        if issues:
+            return {"status": "FAIL", "score": 0.58, "checks": checks, "issues": issues}
+        return {"status": "PASS", "score": 0.96, "checks": checks, "issues": []}
+
+    def editorial_rewrite(
+        self,
+        source_text: str,
+        current_translation: str,
+        naturalness_issues: List[Dict[str, Any]],
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """Sửa một số fixture đại diện; các candidate khác được giữ nguyên để test fail-closed."""
+        if "[[EDITORIAL_REWRITE_FAIL]]" in current_translation:
+            return current_translation
+        source = (source_text or "").strip().lower()
+        target = current_translation or ""
+        if "decided to take action immediately" in source:
+            return "Công ty quyết định hành động ngay."
+        if "proposal was approved by the board" in source:
+            return "Hội đồng quản trị đã phê duyệt đề xuất."
+        if "đưa ra quyết định" in target.lower():
+            return target.replace("đã đưa ra quyết định để thực hiện hành động ngay lập tức", "quyết định hành động ngay")
+        return target

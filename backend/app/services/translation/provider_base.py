@@ -118,3 +118,33 @@ class TranslationProvider(ABC):
     ) -> Dict[str, Any]:
         """Review semantic Phase 3; provider cũ có thể chưa hỗ trợ contract này."""
         raise NotImplementedError("Provider chưa hỗ trợ semantic-critic-v1")
+
+    def review_naturalness(
+        self,
+        source_text: str,
+        translated_text: str,
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        previous_context: Any = None,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Đánh giá độ tự nhiên; provider cũ không được âm thầm coi là đạt."""
+        raise NotImplementedError("Provider chưa hỗ trợ vietnamese-naturalness-critic-v1")
+
+    def editorial_rewrite(
+        self,
+        source_text: str,
+        current_translation: str,
+        naturalness_issues: List[Dict[str, Any]],
+        document_type: str,
+        register: str,
+        sentence_style: str,
+        glossary_terms: Optional[Dict[str, str]] = None,
+        entity_context: Optional[Dict[str, str]] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """Viết lại có kiểm soát; mặc định từ chối để tránh fallback không an toàn."""
+        raise NotImplementedError("Provider chưa hỗ trợ editorial-rewrite-v1")

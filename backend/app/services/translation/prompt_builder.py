@@ -13,7 +13,20 @@ from app.services.translation.term_matcher import TermMatcher
 
 class PromptBuilder:
     MODE_INSTRUCTIONS = {
-        "NATURAL": "Use Natural Vietnamese suitable for publishing and moderately restructure English syntax.",
+        "NATURAL": (
+            "Use Natural, fluent Vietnamese suitable for publishing. Preserve meaning, not English wording or grammar. "
+            "Read and understand the complete sentence or paragraph before translating; do not map words one-to-one "
+            "and do not preserve English word order merely because it is grammatical. Recreate each sentence with "
+            "natural Vietnamese syntax and idiomatic Vietnamese collocations. You may move adverbials, change active "
+            "and passive voice when the meaning stays identical, turn nominalizations into verbs, remove needless "
+            "filler, and split or combine sentences when every proposition, reference and relationship is preserved. "
+            "Avoid these anti-patterns: word-for-word translation, English word order, excessive passive voice, "
+            "unnecessary nominalization, awkward literal collocations, redundant phrases, and unsuitable pronoun or "
+            "reference choices. Avoid needless filler such as 'thực hiện việc', 'tiến hành việc' or 'một cách' when "
+            "natural Vietnamese does not need it. Do not invent Sino-Vietnamese or academic terminology when the "
+            "source does not require it. Preserve facts, negation, conditions, modality, scope, causality, entities, "
+            "locked terminology and formatting exactly; naturalness never outranks semantic correctness."
+        ),
         "BALANCED": "Balance natural Vietnamese with close semantic alignment.",
         "FAITHFUL": "Stay close to the source structure while keeping grammatical Vietnamese.",
         "ACADEMIC": "Use formal scholarly Vietnamese with precise terminology.",

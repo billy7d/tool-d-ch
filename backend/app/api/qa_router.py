@@ -18,6 +18,8 @@ from app.services.translation.contextual_engine import ContextualTranslationEngi
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import build_translation_signature_from_config
 from app.services.translation.semantic_assurance import SemanticAssuranceService
+from app.services.translation.vietnamese_editorial_assurance import TranslationPublicationAssuranceService
+from app.services.qa.vietnamese_naturalness_critic import naturalness_result_to_qa_issues
 from app.services.qa.global_consistency import GlobalConsistencyScanner
 from app.services.translation.entity_ledger import EntityLedgerService
 
@@ -186,7 +188,7 @@ def run_global_consistency(project_id: str):
 
 
 @router.post("/run")
-def run_qa_checks(project_id: str, enable_ai_qa: bool = False):
+def run_qa_checks(project_id: str, enable_ai_qa: bool = False, enable_naturalness: bool = True):
     db = get_project_db(project_id)
     qa_repo = QARepository(db)
 
@@ -199,12 +201,22 @@ def run_qa_checks(project_id: str, enable_ai_qa: bool = False):
         ).delete()
         db.commit()
 
+        naturalness_engine = None
+        if enable_naturalness:
+            _, _, naturalness_engine = _semantic_engine(db, project_id)
+
         nodes = db.query(NodeModel).filter(
             NodeModel.project_id == project_id,
             NodeModel.translated_content != None
         ).all()
 
         created_issues_count = 0
+        naturalness_reviewed = 0
+        naturalness_passed = 0
+        naturalness_failed = 0
+        naturalness_errors = 0
+        naturalness_critic_calls = 0
+        naturalness_latency_ms = 0.0
 
         for n in nodes:
             # 1. Deterministic QA
@@ -238,9 +250,47 @@ def run_qa_checks(project_id: str, enable_ai_qa: bool = False):
                     )
                     created_issues_count += 1
 
+            # 3. Naturalness critic là QA production riêng, không thay thế semantic QA.
+            if naturalness_engine:
+                chapter = db.query(ChapterModel).filter(ChapterModel.id == n.chapter_id).first()
+                if chapter:
+                    naturalness = TranslationPublicationAssuranceService._review_naturalness(
+                        naturalness_engine, chapter, n, n.translated_content,
+                    )
+                    naturalness_reviewed += 1
+                    naturalness_critic_calls += naturalness.critic_calls
+                    naturalness_latency_ms += naturalness.critic_latency_ms
+                    if naturalness.passed(
+                        getattr(naturalness_engine.config, "naturalness_pass_threshold", 0.80),
+                    ):
+                        naturalness_passed += 1
+                    else:
+                        naturalness_failed += 1
+                        naturalness_errors += naturalness.status == "ERROR"
+                        for issue in naturalness_result_to_qa_issues(
+                            naturalness, n.content, n.translated_content,
+                        ):
+                            qa_repo.add_issue(
+                                project_id=project_id,
+                                node_id=n.id,
+                                issue_type=issue["issue_type"],
+                                severity=issue["severity"],
+                                message=issue["message"],
+                                source_snippet=issue["source_snippet"],
+                                translation_snippet=issue["translation_snippet"],
+                                suggested_fix=issue["suggested_fix"],
+                            )
+                            created_issues_count += 1
+
         return {
             "message": f"Kiểm tra QA hoàn tất. Phát hiện {created_issues_count} cảnh báo.",
-            "total_issues": created_issues_count
+            "total_issues": created_issues_count,
+            "naturalness_reviewed": naturalness_reviewed,
+            "naturalness_passed": naturalness_passed,
+            "naturalness_failed": naturalness_failed,
+            "naturalness_errors": naturalness_errors,
+            "naturalness_critic_calls": naturalness_critic_calls,
+            "naturalness_latency_ms": round(naturalness_latency_ms, 2),
         }
     finally:
         db.close()

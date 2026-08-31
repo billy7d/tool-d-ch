@@ -81,8 +81,8 @@ export const apiClient = {
     api.post(`/projects/${projectId}/glossary/import_csv`, formData).then((r) => r.data),
 
   // QA
-  runQA: (projectId: string, enableAiQa: boolean = false) =>
-    api.post(`/projects/${projectId}/qa/run?enable_ai_qa=${enableAiQa}`).then((r) => r.data),
+  runQA: (projectId: string, enableAiQa: boolean = false, enableNaturalness: boolean = true) =>
+    api.post(`/projects/${projectId}/qa/run?enable_ai_qa=${enableAiQa}&enable_naturalness=${enableNaturalness}`).then((r) => r.data),
   getQAIssues: (projectId: string, status?: string) =>
     api.get<QAIssue[]>(`/projects/${projectId}/qa/issues`, { params: { status } }).then((r) => r.data),
   updateQAIssue: (projectId: string, issueId: string, status: string) =>

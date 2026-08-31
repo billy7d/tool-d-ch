@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, Optional
 from sqlalchemy.orm import Session
 
 from app.db.models import QAIssueModel, SemanticReviewModel
+from app.services.qa.vietnamese_naturalness_critic import NATURALNESS_CHECKS
 from app.db.repository import TranslationRepository
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.translation_memory import TranslationMemoryService
@@ -26,6 +27,7 @@ class TranslationCommitService:
         resolved_issue_ids: Optional[Iterable[str]] = None,
         semantic_result: Optional[Dict[str, Any]] = None,
         latency_ms: float = 0.0,
+        naturalness_result: Optional[Dict[str, Any]] = None,
     ):
         """Lưu node/version/TM/QA/semantic trong một transaction duy nhất."""
         quality = TranslationQualityGate().validate(node.content, translated_text, locked_glossary or {})
@@ -34,6 +36,16 @@ class TranslationCommitService:
             raise ValueError(f"Candidate không qua Quality Gate cuối: {codes}")
         if semantic_result and semantic_result.get("status") not in {"PASS", "NOT_REQUIRED"}:
             raise ValueError("Candidate chưa được semantic policy cho phép lưu")
+        if naturalness_result:
+            checks = naturalness_result.get("checks") or {}
+            if (
+                naturalness_result.get("status") != "PASS"
+                or naturalness_result.get("score") is None
+                or float(naturalness_result.get("score")) < float(naturalness_result.get("pass_threshold", 0.80))
+                or naturalness_result.get("issues")
+                or any(checks.get(name) != "PASS" for name in NATURALNESS_CHECKS)
+            ):
+                raise ValueError("Candidate chưa được naturalness policy cho phép lưu")
         entity_issues = EntityLedgerService.validate_locked(
             db, project_id, node.content, translated_text, locked_glossary,
         )

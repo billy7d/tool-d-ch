@@ -48,6 +48,18 @@ class TranslationWorker:
                 current.update({"retry_count": data.get("attempt", 0), "quality_state": "RETRYING"})
             elif event_type == "TRANSLATION_NODE_NEEDS_REVIEW":
                 current.update({"quality_state": "NEEDS_REVIEW"})
+            elif event_type == "TRANSLATION_NATURALNESS_REVIEW":
+                current.update({
+                    "naturalness_score": data.get("naturalness_score"),
+                    "naturalness_status": data.get("naturalness_status"),
+                    "naturalness_critic_calls": data.get("naturalness_critic_calls", 0),
+                    "naturalness_latency_ms": data.get("naturalness_latency_ms", 0.0),
+                })
+            elif event_type == "TRANSLATION_EDITORIAL_REWRITE":
+                current.update({
+                    "editorial_rewrite_count": data.get("editorial_rewrite_count", 0),
+                    "editorial_rewrite_success": data.get("editorial_rewrite_success", False),
+                })
         for sub in self.subscribers:
             try:
                 sub(payload)
@@ -195,6 +207,25 @@ class TranslationWorker:
             wait_interval = min(10.0, wait_interval * 1.5)
         return False
 
+    def _broadcast_assurance_telemetry(self, project_id: str, node_id: str, result: Any) -> None:
+        """Phát telemetry P0 mà không thay đổi trạng thái commit của node."""
+        if getattr(result, "naturalness_status", "NOT_RUN") != "NOT_RUN":
+            self.broadcast_event("TRANSLATION_NATURALNESS_REVIEW", {
+                "project_id": project_id,
+                "node_id": node_id,
+                "naturalness_status": result.naturalness_status,
+                "naturalness_score": result.naturalness_score,
+                "naturalness_critic_calls": result.naturalness_critic_calls,
+                "naturalness_latency_ms": result.naturalness_latency_ms,
+            })
+        if getattr(result, "editorial_rewrite_count", 0):
+            self.broadcast_event("TRANSLATION_EDITORIAL_REWRITE", {
+                "project_id": project_id,
+                "node_id": node_id,
+                "editorial_rewrite_count": result.editorial_rewrite_count,
+                "editorial_rewrite_success": result.editorial_rewrite_success,
+            })
+
     def _run_translation_loop(
         self,
         project_id: str,
@@ -277,6 +308,7 @@ class TranslationWorker:
                                 engine, chapter, first_model, tm_hit, signature,
                                 f"TM ({config.model_name})", "translation_worker_tm",
                             )
+                            self._broadcast_assurance_telemetry(project_id, first_model.id, semantic)
                             if not semantic.approved:
                                 self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
                                     "project_id": project_id, "node_id": first_model.id,
@@ -311,6 +343,7 @@ class TranslationWorker:
                                 latency_ms=result.telemetry.latency_ms,
                                 previous_repairs=max(0, result.attempts - 1),
                             )
+                            self._broadcast_assurance_telemetry(project_id, result.node_id, semantic)
                             if not semantic.approved:
                                 self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
                                     "project_id": project_id, "node_id": result.node_id,

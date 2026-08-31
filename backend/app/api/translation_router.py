@@ -20,6 +20,7 @@ from app.services.translation.translation_signature import (
     build_translation_signature_from_config,
 )
 from app.services.translation.semantic_assurance import SemanticAssuranceService
+from app.services.translation.vietnamese_editorial_assurance import TranslationPublicationAssuranceService
 
 router = APIRouter(prefix="/api/projects/{project_id}/translation", tags=["Translation"])
 
@@ -113,6 +114,12 @@ def get_translation_status(project_id: str):
         context_mode=telemetry.get("context_mode", "CONTEXTUAL_BALANCED"),
         retry_count=telemetry.get("retry_count", 0),
         quality_state=telemetry.get("quality_state", "READY"),
+        naturalness_score=telemetry.get("naturalness_score"),
+        naturalness_status=telemetry.get("naturalness_status"),
+        naturalness_critic_calls=telemetry.get("naturalness_critic_calls", 0),
+        naturalness_latency_ms=telemetry.get("naturalness_latency_ms", 0.0),
+        editorial_rewrite_count=telemetry.get("editorial_rewrite_count", 0),
+        editorial_rewrite_success=telemetry.get("editorial_rewrite_success", False),
         execution_status=execution_status,
         document_status=proj.current_stage,
     )
@@ -170,11 +177,24 @@ def preview_translation(project_id: str, payload: TranslationPreviewRequest):
             if not chapter:
                 continue
             result = engine.preview_node(chapter, engine.canonical_node(node))
+            naturalness = None
+            if TranslationPublicationAssuranceService.naturalness_enabled(engine):
+                naturalness = TranslationPublicationAssuranceService._review_naturalness(
+                    engine, chapter, node, result.translated_text,
+                )
             samples.append({
                 "node_id": node.id,
                 "source": node.content,
                 "translation": result.translated_text,
-                "quality": {"passed": result.passed, "issues": result.quality.issues},
+                "quality": {
+                    "passed": result.passed and (
+                        naturalness is None or naturalness.passed(
+                            getattr(config, "naturalness_pass_threshold", 0.80),
+                        )
+                    ),
+                    "issues": result.quality.issues,
+                    "naturalness": naturalness.to_dict() if naturalness else {"status": "NOT_RUN"},
+                },
             })
         return {"samples": samples, "profile": engine.document_profile.to_dict(), "prompt_version": PROMPT_VERSION}
     finally:
