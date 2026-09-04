@@ -2,11 +2,17 @@ from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any
 
 from app.db.engine import get_project_db
-from app.db.models import NodeModel, ChapterModel
+from app.db.models import NodeModel, ChapterModel, ProjectModel
 from app.services.translation.semantic_assurance import SemanticAssuranceService
 from app.db.repository import StructureRepository, ProjectRepository
 from app.models.canonical import CanonicalDocument, NodeType, DocumentNode
+from app.models.canonical import ApprovalStatus
 from app.models.schemas import NodeUpdate, StructureConfirmRequest
+from app.services.translation.contextual_engine import ContextualTranslationEngine
+from app.services.translation.glossary_service import GlossaryService
+from app.services.translation.style_memory import StyleMemoryService
+from app.services.translation.translation_config import TranslationConfig
+from app.services.translation.worker import translation_worker
 
 router = APIRouter(prefix="/api/projects/{project_id}/structure", tags=["Structure"])
 
@@ -43,7 +49,28 @@ def update_node(project_id: str, node_id: str, payload: NodeUpdate):
         updated = repo.update_node(node_id, **update_dict)
         if not updated:
             raise HTTPException(status_code=404, detail="Không tìm thấy phần tử nội dung (node).")
-        return {"message": "Cập nhật thành công", "node_id": node_id}
+        style_memory = {"ingested": False, "reason": "NOT_REQUESTED"}
+        if payload.approval_status == ApprovalStatus.APPROVED:
+            # Approval là hành động rõ ràng của người dùng; chỉ sau đó mới kiểm
+            # deterministic + semantic để đưa ví dụ vào Style Memory project.
+            try:
+                project = db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+                chapter = db.query(ChapterModel).filter(ChapterModel.id == updated.chapter_id).first()
+                if project and chapter and updated.translated_content:
+                    config = TranslationConfig.from_project(project)
+                    provider = translation_worker.get_provider(config.model_name)
+                    glossary = GlossaryService.get_locked_glossary_map(db, project_id)
+                    engine = ContextualTranslationEngine(db, project, provider, config, glossary)
+                    result = StyleMemoryService.ingest_approved_node(
+                        db, project_id, updated, engine, chapter, approval_source="QA_EDITOR",
+                    )
+                    style_memory = result.__dict__
+                else:
+                    style_memory = {"ingested": False, "reason": "SOURCE_OR_TARGET_EMPTY"}
+            except Exception as exc:
+                # Không để lỗi style memory làm mất thao tác duyệt node đã lưu.
+                style_memory = {"ingested": False, "reason": "STYLE_MEMORY_VERIFICATION_ERROR", "detail": str(exc)}
+        return {"message": "Cập nhật thành công", "node_id": node_id, "style_memory": style_memory}
     finally:
         db.close()
 

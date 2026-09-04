@@ -158,6 +158,14 @@ class GlossaryModel(Base):
     category = Column(String(64), default="GENERAL")
     notes = Column(Text, nullable=True)
     locked = Column(Boolean, default=True)  # locked glossary is strictly enforced
+    # Các cột mới bổ sung nhưng vẫn giữ source_term/target_term cho DB và API cũ.
+    preferred_target = Column(String(255), nullable=True)
+    allowed_variants = Column(JSON, default=list)
+    sense_hint = Column(Text, nullable=True)
+    domain = Column(String(64), default="GENERAL")
+    part_of_speech = Column(String(64), nullable=True)
+    preserve_original = Column(Boolean, default=False)
+    lock_level = Column(String(16), default="HARD")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("ProjectModel", back_populates="glossary_items")
@@ -183,6 +191,38 @@ class TranslationMemoryModel(Base):
 
     __table_args__ = (
         Index("ix_tm_lookup", "source_hash", "style_hash", "glossary_hash"),
+    )
+
+
+class StyleMemoryModel(Base):
+    """Ví dụ văn phong đã được người dùng duyệt, tách biệt hoàn toàn khỏi TM."""
+
+    __tablename__ = "style_memory"
+
+    id = Column(String(64), primary_key=True)
+    project_id = Column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_text = Column(Text, nullable=False)
+    approved_vi = Column(Text, nullable=False)
+    source_hash = Column(String(64), nullable=False)
+    approved_hash = Column(String(64), nullable=False)
+    domain = Column(String(64), default="GENERAL")
+    document_type = Column(String(64), default="GENERAL")
+    register = Column(String(64), default="")
+    translation_mode = Column(String(32), default="NATURAL")
+    node_type = Column(String(32), default="paragraph")
+    source_patterns = Column(JSON, default=list)
+    scope = Column(String(32), default="PROJECT")
+    quality_status = Column(String(32), default="USER_APPROVED")
+    approval_source = Column(String(64), default="QA_EDITOR")
+    approved_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "source_hash", "approved_hash", "domain",
+            "translation_mode", "node_type", name="uq_style_memory_dedup",
+        ),
+        Index("ix_style_memory_project_domain", "project_id", "domain"),
     )
 
 

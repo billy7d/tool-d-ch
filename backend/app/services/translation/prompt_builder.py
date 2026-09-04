@@ -129,56 +129,126 @@ class PromptBuilder:
             if TermMatcher.contains(combined, source)
         }
 
-    @staticmethod
-    def _context_parts(context: Optional[TranslationContext], chapter_title: str = "") -> List[str]:
+    @classmethod
+    def _context_parts(cls, context: Optional[TranslationContext], chapter_title: str = "") -> List[str]:
         parts: List[str] = []
-        if chapter_title:
-            parts.append("CURRENT CHAPTER\n" + chapter_title)
         if not context:
+            if chapter_title:
+                parts.append("CURRENT CHAPTER\n" + chapter_title)
             return parts
-        if context.document_memory:
+        parts.append(
+            "CONTEXT PRIORITY\n"
+            "For the current source, protect the semantic contract and source first; then use HARD terms/entities, "
+            "the immediate approved bilingual context, retrieved user style, curated examples, chapter memory and "
+            "distant document observations in that order. Context is guidance only and never changes source facts."
+        )
+        if context.glossary:
+            hard_entries = context.glossary_details or [
+                {"source_term": source, "preferred_target": target, "allowed_variants": []}
+                for source, target in context.glossary.items()
+            ]
             parts.append(
-                "SOURCE DOCUMENT CHARACTERISTICS - DESCRIPTIVE ONLY\n"
-                "These observations describe the source. They must not override TARGET register, sentence style, "
-                "translation mode, locked glossary or user instructions.\n" + context.document_memory
+                "MANDATORY HARD TERMS\n"
+                "HARD glossary terms are mandatory. Use the preferred Vietnamese target exactly when the source term "
+                "is present. A mismatch is a deterministic ERROR; do not replace the source or force a term when it "
+                "is not present.\n" + "\n".join(
+                    cls._glossary_line(item) for item in hard_entries
+                )
             )
-        if context.chapter_memory:
-            parts.append("CHAPTER MEMORY\n" + context.chapter_memory)
-        if context.few_shots:
-            parts.append("DOMAIN EXAMPLES - STYLE REFERENCE ONLY\n" + "\n".join(
-                f"Source: {item['source']}\nNatural Vietnamese: {item['target']}" for item in context.few_shots
+        if context.soft_glossary:
+            soft_entries = context.soft_glossary_details or [
+                {"source_term": source, "preferred_target": target, "allowed_variants": []}
+                for source, target in context.soft_glossary.items()
+            ]
+            parts.append(
+                "PREFERRED / SOFT TERMS\n"
+                "These are contextual preferences, not hard constraints. Prefer them when the current sense and "
+                "grammar support them; variants are allowed and a mismatch is not an automatic ERROR. Never use a "
+                "regex replacement to force a soft term.\n" + "\n".join(
+                    cls._glossary_line(item) for item in soft_entries
+                )
+            )
+        if context.entity_decisions:
+            parts.append("CURRENT RELEVANT ENTITY DECISIONS\n" + "\n".join(
+                f'- "{source}" -> "{target}"' for source, target in context.entity_decisions.items()
             ))
         if context.previous_context:
             previous = "\n\n".join(
                 f"SOURCE PREVIOUS:\n{item.source}\nAPPROVED VIETNAMESE:\n{item.translation}"
                 for item in context.previous_context
             )
-            parts.append(
-                "PREVIOUS BILINGUAL CONTEXT - REFERENCE ONLY; DO NOT TRANSLATE IT AGAIN.\n"
-                "Use only for terminology, pronouns, naming, tone, rhythm and continuity.\n" + previous
+            if context.continuity_context:
+                parts.append(
+                    "PREVIOUS SEGMENT CONTINUITY - REFERENCE ONLY\n"
+                    "Keep references, terminology, tense and sentence cohesion consistent with this immediately prior "
+                    "segment. Translate CURRENT SEGMENT only; do not repeat the previous segment.\n"
+                    f"PREVIOUS SEGMENT SOURCE:\n{context.continuity_context.source}\n"
+                    f"PREVIOUS SEGMENT APPROVED VIETNAMESE:\n{context.continuity_context.translation}"
+                )
+            else:
+                parts.append(
+                    "IMMEDIATE APPROVED BILINGUAL CONTEXT - REFERENCE ONLY; DO NOT TRANSLATE IT AGAIN.\n"
+                    "Use only for terminology, pronouns, naming, tone, rhythm and continuity.\n" + previous
+                )
+        if context.style_memory_examples:
+            style_examples = "\n\n".join(
+                f"SOURCE STYLE EXAMPLE:\n{item.get('source_text', item.get('source', ''))}\n"
+                f"APPROVED VIETNAMESE STYLE:\n{item.get('approved_vi', item.get('target', ''))}"
+                for item in context.style_memory_examples
             )
-        if context.glossary:
-            parts.append("MANDATORY RELEVANT GLOSSARY\n" + "\n".join(
-                f'- "{source}" -> "{target}"' for source, target in context.glossary.items()
+            parts.append(
+                "RETRIEVED USER STYLE MEMORY - STYLE REFERENCE ONLY\n"
+                "Use retrieved examples only as Vietnamese style references. Never copy their facts, entities, "
+                "numbers, or propositions into the current translation.\n" + style_examples
+            )
+        if context.few_shots:
+            parts.append("CURATED DOMAIN EXAMPLES - STYLE REFERENCE ONLY\n" + "\n".join(
+                f"Source: {item.get('source', '')}\nNatural Vietnamese: {item.get('target', '')}"
+                for item in context.few_shots
             ))
-        if context.entity_decisions:
-            parts.append("CURRENT RELEVANT ENTITY DECISIONS\n" + "\n".join(
-                f'- "{source}" -> "{target}"' for source, target in context.entity_decisions.items()
-            ))
+        if context.document_memory:
+            parts.append(
+                "SOURCE DOCUMENT CHARACTERISTICS - DESCRIPTIVE ONLY\n"
+                "These observations describe the source. They must not override TARGET register, sentence style, "
+                "translation mode, locked glossary or user instructions.\n" + context.document_memory
+            )
+        if chapter_title:
+            parts.append("CURRENT CHAPTER\n" + chapter_title)
+        if context.chapter_memory:
+            parts.append("CHAPTER MEMORY\n" + context.chapter_memory)
         return parts
+
+    @staticmethod
+    def _glossary_line(item: Dict[str, Any]) -> str:
+        source = item.get("source_term", item.get("source", ""))
+        target = item.get("preferred_target", item.get("target_term", item.get("target", "")))
+        variants = ", ".join(str(value) for value in (item.get("allowed_variants") or []))
+        sense = str(item.get("sense_hint", "") or "").strip()
+        domain = str(item.get("domain", "") or "").strip()
+        details = []
+        if variants:
+            details.append(f"allowed variants: {variants}")
+        if sense:
+            details.append(f"sense hint: {sense}")
+        if domain:
+            details.append(f"domain: {domain}")
+        if item.get("preserve_original"):
+            details.append("preserve original")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        return f'- "{source}" -> "{target}"{suffix}'
 
     @classmethod
     def build_batch_prompt(cls, nodes: List[DocumentNode], context: TranslationContext, chapter_title: str = "") -> str:
-        parts = cls._context_parts(context, chapter_title)
         blocks = [{"node_id": node.id, "type": node.type.value, "text": node.content} for node in nodes]
-        parts.append("CURRENT SOURCE BLOCKS\n" + json.dumps(blocks, ensure_ascii=False, indent=2))
+        parts = ["CURRENT SOURCE BLOCKS\n" + json.dumps(blocks, ensure_ascii=False, indent=2)]
+        parts.extend(cls._context_parts(context, chapter_title))
         parts.append("Translate CURRENT SOURCE BLOCKS only. Preserve every proposition.\n" + cls.BATCH_OUTPUT_CONTRACT)
         return "\n\n".join(parts)
 
     @classmethod
     def build_single_prompt(cls, node: DocumentNode, context: TranslationContext, chapter_title: str = "") -> str:
-        parts = cls._context_parts(context, chapter_title)
-        parts.append("CURRENT SOURCE\n" + node.content)
+        parts = ["CURRENT SOURCE\n" + node.content]
+        parts.extend(cls._context_parts(context, chapter_title))
         parts.append("Translate CURRENT SOURCE completely.\n" + cls.SINGLE_OUTPUT_CONTRACT)
         return "\n\n".join(parts)
 
@@ -208,8 +278,9 @@ class PromptBuilder:
         segment_index: int = 1,
         segment_count: int = 1,
     ) -> str:
-        parts = cls._context_parts(context, chapter_title)
-        parts.append(f"SEGMENT {segment_index}/{segment_count}\nCURRENT SEGMENT\n{segment_text}")
+        parts = ["CURRENT SEGMENT\n" + segment_text]
+        parts.extend(cls._context_parts(context, chapter_title))
+        parts.insert(1, f"SEGMENT {segment_index}/{segment_count}")
         parts.append(cls.SEGMENT_OUTPUT_CONTRACT)
         return "\n\n".join(parts)
 

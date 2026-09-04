@@ -10,15 +10,17 @@ from app.db.models import ChapterModel, NodeModel
 from app.models.canonical import DocumentNode, NodeStatus
 from app.services.translation.adaptive_chunker import AdaptiveSemanticChunker, SemanticChunk, TextSegment
 from app.services.translation.context_assembler import ContextAssembler, TranslationContext, estimate_tokens
-from app.services.translation.context_memory import ChapterMemory, ChapterMemoryBuilder, RollingContextService
+from app.services.translation.context_memory import BilingualContextItem, ChapterMemory, ChapterMemoryBuilder, RollingContextService
 from app.services.translation.document_profiler import DocumentProfiler, DocumentTranslationProfile
 from app.services.translation.entity_ledger import EntityLedgerService
+from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.json_parser import validate_translation_batch
 from app.services.translation.node_policy import normalize_node_type
 from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.prompt_profiles import select_few_shots
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.quality_gate import QualityGateResult, TranslationQualityGate
+from app.services.translation.style_memory import StyleMemoryService
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
 
@@ -31,7 +33,12 @@ class EngineTelemetry:
     chapter_tokens: int = 0
     rolling_tokens: int = 0
     glossary_tokens: int = 0
+    soft_glossary_tokens: int = 0
+    entity_tokens: int = 0
     few_shot_tokens: int = 0
+    style_memory_tokens: int = 0
+    few_shot_count: int = 0
+    style_memory_hits: int = 0
     source_tokens: int = 0
     reserved_output: int = 0
     safety_margin: int = 0
@@ -70,13 +77,42 @@ class ContextualTranslationEngine:
         config: TranslationConfig,
         locked_glossary: Optional[Dict[str, str]] = None,
         event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        glossary_entries: Optional[List[Dict[str, Any]]] = None,
     ):
         self.db = db
         self.project = project
         self.project_id = str(project.id)
         self.provider = provider
         self.config = config
-        self.locked_glossary = dict(locked_glossary or {})
+        legacy_locked_glossary = dict(locked_glossary or {})
+        if glossary_entries is None:
+            try:
+                glossary_entries = GlossaryService.get_contextual_glossary(
+                    db, self.project_id, domain=config.document_type,
+                )
+            except Exception:
+                glossary_entries = []
+        self.glossary_entries = list(glossary_entries or [])
+        if self.glossary_entries:
+            # Khi có glossary có domain, chỉ đưa hard terms đúng scope hiện tại vào prompt/gate.
+            self.locked_glossary = {
+                str(item.get("source_term", "")): str(
+                    item.get("preferred_target") or item.get("target_term") or ""
+                )
+                for item in self.glossary_entries
+                if item.get("source_term")
+                and str(item.get("lock_level", "HARD") or "HARD").upper() == "HARD"
+                and (item.get("preferred_target") or item.get("target_term"))
+            }
+        else:
+            self.locked_glossary = legacy_locked_glossary
+        self.glossary_validation_terms: Any = self.glossary_entries or self.locked_glossary
+        self.soft_glossary = {
+            str(item.get("source_term", "")): str(item.get("preferred_target", item.get("target_term", "")))
+            for item in self.glossary_entries
+            if str(item.get("lock_level", "HARD")).upper() == "SOFT"
+            and item.get("source_term") and (item.get("preferred_target") or item.get("target_term"))
+        }
         self.event_callback = event_callback
         self.capabilities = provider.get_model_capabilities(config.model_name)
         self.effective_context_window = min(
@@ -180,11 +216,33 @@ class ContextualTranslationEngine:
         prompt_kind: str,
         neighbors: bool = False,
         issues: Optional[List[Dict[str, Any]]] = None,
+        continuity_context: Optional[Any] = None,
     ) -> TranslationContext:
         node_type = nodes[0].type.value if nodes else "paragraph"
+        source_text = "\n".join(node.content or "" for node in nodes)
         few_shots = select_few_shots(
-            self.config.document_type, self.config.translation_mode, node_type, limit=1,
+            self.config.document_type,
+            self.config.translation_mode,
+            node_type,
+            limit=4 if str(getattr(self.config, "quality_tier", "")).upper() == "PUBLISHING" else 3,
+            source_text=source_text,
         )
+        style_examples = []
+        if str(getattr(self.config, "quality_tier", "HIGH_QUALITY")).upper() != "FAST":
+            try:
+                style_examples = StyleMemoryService.retrieve_examples(
+                    self.db,
+                    self.project_id,
+                    source_text,
+                    domain=self.config.document_type,
+                    document_type=self.config.document_type,
+                    register=self.config.register,
+                    translation_mode=self.config.translation_mode,
+                    node_type=node_type,
+                    limit=3,
+                )
+            except Exception:
+                style_examples = []
         if prompt_kind == "batch":
             contract = PromptBuilder.BATCH_OUTPUT_CONTRACT
         elif prompt_kind == "segment":
@@ -199,7 +257,7 @@ class ContextualTranslationEngine:
             nodes,
             self.document_profile,
             self.chapter_memory(chapter),
-            self._rolling_context(chapter, nodes, neighbors),
+            [continuity_context] if continuity_context else self._rolling_context(chapter, nodes, neighbors),
             self.locked_glossary,
             self.capabilities,
             few_shots,
@@ -207,9 +265,13 @@ class ContextualTranslationEngine:
             output_contract=contract,
             prompt_kind=prompt_kind,
             compact_system_prompt=self.compact_system_prompt,
+            soft_glossary=getattr(self, "soft_glossary", {}),
+            glossary_entries=getattr(self, "glossary_entries", []),
+            style_memory_examples=style_examples,
+            continuity_context=continuity_context,
             # Đọc ledger theo từng request để quyết định mới có hiệu lực ngay trong cùng engine.
             entity_decisions=EntityLedgerService.relevant_decisions(
-                self.db, self.project_id, "\n".join(node.content or "" for node in nodes), self.locked_glossary,
+                self.db, self.project_id, source_text, self.locked_glossary,
             ),
         )
         if context.trim_steps:
@@ -232,7 +294,12 @@ class ContextualTranslationEngine:
             chapter_tokens=budget.chapter_tokens,
             rolling_tokens=budget.rolling_tokens,
             glossary_tokens=budget.glossary_tokens,
+            soft_glossary_tokens=budget.soft_glossary_tokens,
+            entity_tokens=budget.entity_tokens,
             few_shot_tokens=budget.few_shot_tokens,
+            style_memory_tokens=budget.style_memory_tokens,
+            few_shot_count=len(context.few_shots),
+            style_memory_hits=len(context.style_memory_examples),
             source_tokens=budget.source_tokens,
             reserved_output=budget.reserved_output_tokens,
             safety_margin=budget.safety_margin_tokens,
@@ -293,7 +360,7 @@ class ContextualTranslationEngine:
         return chunks
 
     def _empty_failure(self, node: DocumentNode, code: str, message: str, telemetry: Optional[EngineTelemetry] = None) -> EngineNodeResult:
-        gate = TranslationQualityGate().validate(node.content, "", self.locked_glossary)
+        gate = TranslationQualityGate().validate(node.content, "", self.glossary_validation_terms)
         issues = list(gate.issues) + [{"code": code, "severity": "ERROR", "message": message}]
         failed_gate = QualityGateResult(False, True, 0.0, issues)
         return EngineNodeResult(node.id, "", failed_gate, False, error=message, telemetry=telemetry or EngineTelemetry())
@@ -336,7 +403,7 @@ class ContextualTranslationEngine:
         results: List[EngineNodeResult] = []
         for node in nodes:
             candidate = VietnamesePostProcessor.normalize_safely(translated.get(node.id, ""))
-            gate = TranslationQualityGate().validate(node.content, candidate, self.locked_glossary)
+            gate = TranslationQualityGate().validate(node.content, candidate, self.glossary_validation_terms)
             if gate.passed:
                 results.append(EngineNodeResult(node.id, candidate, gate, True, telemetry=telemetry))
                 continue
@@ -371,7 +438,7 @@ class ContextualTranslationEngine:
             return self._empty_failure(node, "TRANSLATION_PROVIDER_ERROR", str(exc), telemetry)
         telemetry.latency_ms = (time.perf_counter() - started) * 1000
         candidate = VietnamesePostProcessor.normalize_safely(candidate)
-        gate = TranslationQualityGate().validate(node.content, candidate, self.locked_glossary)
+        gate = TranslationQualityGate().validate(node.content, candidate, self.glossary_validation_terms)
         if gate.passed or max_attempts <= 1:
             return EngineNodeResult(node.id, candidate, gate, gate.passed, telemetry=telemetry)
         repaired = self.repair_node(chapter, node, gate.issues, max_attempts=max_attempts - 1)
@@ -415,7 +482,7 @@ class ContextualTranslationEngine:
                 continue
             telemetry.latency_ms = (time.perf_counter() - started) * 1000
             candidate = VietnamesePostProcessor.normalize_safely(candidate)
-            gate = TranslationQualityGate().validate(node.content, candidate, self.locked_glossary)
+            gate = TranslationQualityGate().validate(node.content, candidate, self.glossary_validation_terms)
             last = EngineNodeResult(node.id, candidate, gate, gate.passed, attempts=attempt + 1, telemetry=telemetry)
             if gate.passed:
                 return last
@@ -429,12 +496,19 @@ class ContextualTranslationEngine:
         initial_limit = max(64, min(self.capabilities.recommended_source_tokens, self.effective_context_window // 5))
         pending = AdaptiveSemanticChunker.split_with_layout(node.content, initial_limit)
         translated_parts: List[TextSegment] = []
+        previous_segment: Optional[BilingualContextItem] = None
         total_telemetry = EngineTelemetry(context_limit=self.effective_context_window)
         index = 0
         while index < len(pending):
             part = pending[index]
             segment_node = node.model_copy(update={"content": part.text})
-            context = self.assemble_context(chapter, [segment_node], "segment", neighbors=True)
+            context = self.assemble_context(
+                chapter,
+                [segment_node],
+                "segment",
+                neighbors=previous_segment is None,
+                continuity_context=previous_segment,
+            )
             if not context.fits:
                 smaller_limit = min(
                     max(16, context.token_budget.available_source_tokens),
@@ -469,11 +543,17 @@ class ContextualTranslationEngine:
             except Exception as exc:
                 return self._empty_failure(node, "TRANSLATION_PROVIDER_ERROR", str(exc), telemetry)
             telemetry.latency_ms = (time.perf_counter() - started) * 1000
-            translated_parts.append(TextSegment(VietnamesePostProcessor.normalize_safely(candidate), part.separator_after))
+            normalized_candidate = VietnamesePostProcessor.normalize_safely(candidate)
+            translated_parts.append(TextSegment(normalized_candidate, part.separator_after))
+            previous_segment = BilingualContextItem(
+                node_id=f"{node.id}:segment:{index + 1}",
+                source=part.text,
+                translation=normalized_candidate,
+            )
             total_telemetry.provider_calls += telemetry.provider_calls
             total_telemetry.latency_ms += telemetry.latency_ms
             total_telemetry.total_tokens = max(total_telemetry.total_tokens, telemetry.total_tokens)
             index += 1
         combined = "".join(part.text + part.separator_after for part in translated_parts).rstrip()
-        gate = TranslationQualityGate().validate(node.content, combined, self.locked_glossary)
+        gate = TranslationQualityGate().validate(node.content, combined, self.glossary_validation_terms)
         return EngineNodeResult(node.id, combined, gate, gate.passed, attempts=max(1, len(translated_parts)), telemetry=total_telemetry)

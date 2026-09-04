@@ -30,6 +30,8 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
   const [qaIssues, setQaIssues] = useState<QAIssue[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [approvalNotice, setApprovalNotice] = useState<string | null>(null);
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [editedText, setEditedText] = useState('');
   
@@ -131,6 +133,40 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
   const handleSelectNode = (node: DocumentNode) => {
     setSelectedNode(node);
     setEditedText(node.translated_content || '');
+    setApprovalNotice(null);
+  };
+
+  const handleApproveNode = async () => {
+    if (!selectedNode || !editedText.trim()) return;
+    setApproving(true);
+    setApprovalNotice(null);
+    try {
+      const result = await apiClient.approveNode(project.id, selectedNode.id, editedText);
+      setSelectedNode({
+        ...selectedNode,
+        translated_content: editedText,
+        approval_status: 'APPROVED',
+      });
+      if (doc) {
+        for (const chapter of doc.chapters) {
+          const node = chapter.nodes.find((item) => item.id === selectedNode.id);
+          if (node) {
+            node.translated_content = editedText;
+            node.approval_status = 'APPROVED';
+            break;
+          }
+        }
+      }
+      setApprovalNotice(
+        result.style_memory?.ingested
+          ? 'Đã duyệt và ghi nhớ ví dụ văn phong cho project.'
+          : `Đã duyệt node; Style Memory chưa nhận ví dụ (${result.style_memory?.reason || 'chưa đủ điều kiện'}).`,
+      );
+    } catch (e) {
+      setApprovalNotice('Không thể duyệt node: ' + e);
+    } finally {
+      setApproving(false);
+    }
   };
 
   const handleRunQA = async () => {
@@ -551,13 +587,23 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
               </span>
 
               {selectedNode && (
-                <button
-                  onClick={() => setShowRetranslate(true)}
-                  className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-400 text-xs font-medium border border-sky-500/30 transition-all"
-                >
-                  <Sparkles className="w-3 h-3" />
-                  <span>Dịch lại đoạn này với AI</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowRetranslate(true)}
+                    className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-400 text-xs font-medium border border-sky-500/30 transition-all"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>Dịch lại đoạn này với AI</span>
+                  </button>
+                  <button
+                    onClick={handleApproveNode}
+                    disabled={approving || !editedText.trim()}
+                    className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 disabled:opacity-50 text-emerald-400 text-xs font-medium border border-emerald-500/30 transition-all"
+                  >
+                    <Save className="w-3 h-3" />
+                    <span>{approving ? 'Đang duyệt...' : 'Duyệt & ghi nhớ style'}</span>
+                  </button>
+                </div>
               )}
             </div>
 
@@ -569,6 +615,12 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
                   rows={14}
                   className="w-full bg-slate-950 border border-slate-800 rounded-2xl p-5 text-sm font-serif text-white leading-relaxed focus:outline-none focus:border-sky-500 resize-none selection:bg-sky-500"
                 />
+
+                {approvalNotice && (
+                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-300">
+                    {approvalNotice}
+                  </div>
+                )}
 
                 {/* QA Issues for this node */}
                 {qaIssues.filter((i) => i.node_id === selectedNode.id).length > 0 && (

@@ -364,7 +364,31 @@ class GlossaryRepository:
     def list_glossary(self, project_id: str) -> List[GlossaryModel]:
         return self.db.query(GlossaryModel).filter(GlossaryModel.project_id == project_id).order_by(GlossaryModel.source_term).all()
 
-    def add_term(self, project_id: str, source_term: str, target_term: str, category: str = "GENERAL", notes: Optional[str] = None, locked: bool = True) -> GlossaryModel:
+    def add_term(
+        self,
+        project_id: str,
+        source_term: str,
+        target_term: str,
+        category: str = "GENERAL",
+        notes: Optional[str] = None,
+        locked: bool = True,
+        preferred_target: Optional[str] = None,
+        allowed_variants: Optional[List[str]] = None,
+        sense_hint: Optional[str] = None,
+        domain: str = "GENERAL",
+        part_of_speech: Optional[str] = None,
+        preserve_original: bool = False,
+        lock_level: Optional[str] = None,
+    ) -> GlossaryModel:
+        # `locked` là cờ legacy; lock_level mới là nguồn chính nhưng luôn đồng bộ hai chiều.
+        normalized_level = str(lock_level or ("HARD" if locked else "SOFT")).upper()
+        if normalized_level not in {"HARD", "SOFT"}:
+            normalized_level = "HARD" if locked else "SOFT"
+        if not locked:
+            normalized_level = "SOFT"
+        effective_locked = normalized_level == "HARD"
+        effective_target = (preferred_target or target_term or "").strip()
+        variants = [str(value).strip() for value in (allowed_variants or []) if str(value).strip()]
         existing = self.db.query(GlossaryModel).filter(
             and_(GlossaryModel.project_id == project_id, GlossaryModel.source_term == source_term)
         ).first()
@@ -372,7 +396,14 @@ class GlossaryRepository:
             existing.target_term = target_term
             existing.category = category
             existing.notes = notes
-            existing.locked = locked
+            existing.locked = effective_locked
+            existing.preferred_target = effective_target
+            existing.allowed_variants = variants
+            existing.sense_hint = sense_hint
+            existing.domain = (domain or "GENERAL").upper()
+            existing.part_of_speech = part_of_speech
+            existing.preserve_original = preserve_original
+            existing.lock_level = normalized_level
             self.db.commit()
             self.db.refresh(existing)
             return existing
@@ -384,7 +415,14 @@ class GlossaryRepository:
             target_term=target_term,
             category=category,
             notes=notes,
-            locked=locked,
+            locked=effective_locked,
+            preferred_target=effective_target,
+            allowed_variants=variants,
+            sense_hint=sense_hint,
+            domain=(domain or "GENERAL").upper(),
+            part_of_speech=part_of_speech,
+            preserve_original=preserve_original,
+            lock_level=normalized_level,
         )
         self.db.add(term)
         self.db.commit()
@@ -398,6 +436,25 @@ class GlossaryRepository:
         for k, v in kwargs.items():
             if hasattr(term, k) and v is not None:
                 setattr(term, k, v)
+        # Các client cũ chỉ gửi locked; client mới có thể chỉ gửi lock_level.
+        requested_level = kwargs.get("lock_level")
+        requested_locked = kwargs.get("locked")
+        if requested_level is not None:
+            normalized_level = str(requested_level).upper()
+            if normalized_level in {"HARD", "SOFT"}:
+                term.lock_level = normalized_level
+                term.locked = normalized_level == "HARD"
+        elif requested_locked is not None:
+            term.locked = bool(requested_locked)
+            term.lock_level = "HARD" if term.locked else "SOFT"
+        if "preferred_target" in kwargs and kwargs.get("preferred_target"):
+            term.target_term = kwargs["preferred_target"]
+        if "target_term" in kwargs and kwargs.get("target_term"):
+            term.preferred_target = kwargs["target_term"]
+        if "allowed_variants" in kwargs and kwargs.get("allowed_variants") is not None:
+            term.allowed_variants = [str(value).strip() for value in kwargs["allowed_variants"] if str(value).strip()]
+        if "domain" in kwargs and kwargs.get("domain"):
+            term.domain = str(kwargs["domain"]).upper()
         self.db.commit()
         self.db.refresh(term)
         return term

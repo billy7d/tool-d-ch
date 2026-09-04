@@ -24,6 +24,7 @@ class TranslationConfig:
     naturalness_pass_threshold: float = 0.80
     naturalness_rewrite_threshold: float = 0.55
     editorial_max_rewrites: int = 1
+    quality_tier: str = "HIGH_QUALITY"
 
     @classmethod
     def from_project(
@@ -61,6 +62,18 @@ class TranslationConfig:
             naturalness_pass_threshold = 0.80
         if not 0.0 <= naturalness_rewrite_threshold < naturalness_pass_threshold:
             naturalness_rewrite_threshold = min(0.55, max(0.0, naturalness_pass_threshold - 0.01))
+        requested_tier = str(
+            style_guide.get("quality_tier")
+            or getattr(project, "qa_level", None)
+            or "BALANCED"
+        ).upper()
+        if requested_tier in {"OFF", "DETERMINISTIC_ONLY", "FAST"}:
+            quality_tier = "FAST"
+        elif requested_tier == "PUBLISHING":
+            quality_tier = "PUBLISHING"
+        else:
+            # BALANCED là tên legacy nhưng đã có pipeline semantic + naturalness P0.
+            quality_tier = "HIGH_QUALITY"
         return cls(
             source_language=str(getattr(project, "source_language", None) or "en"),
             target_language=str(getattr(project, "target_language", None) or "vi"),
@@ -80,6 +93,7 @@ class TranslationConfig:
             naturalness_pass_threshold=naturalness_pass_threshold,
             naturalness_rewrite_threshold=naturalness_rewrite_threshold,
             editorial_max_rewrites=max(0, min(1, int(style_guide.get("editorial_max_rewrites", 1)))),
+            quality_tier=quality_tier,
         )
 
     def signature_payload(self) -> Dict[str, Any]:
@@ -102,4 +116,5 @@ class TranslationConfig:
             "naturalness_pass_threshold": self.naturalness_pass_threshold,
             "naturalness_rewrite_threshold": self.naturalness_rewrite_threshold,
             "editorial_max_rewrites": self.editorial_max_rewrites,
+            "quality_tier": self.quality_tier,
         }

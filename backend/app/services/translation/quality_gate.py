@@ -95,6 +95,13 @@ class TranslationQualityGate:
                     "ERROR",
                     f"Thuật ngữ khóa '{violation.source_term}' phải dùng '{violation.expected_target}'.",
                 ))
+            for warning in glossary.warnings:
+                allowed = ", ".join(warning.allowed_variants) or warning.expected_target
+                issues.append(self._issue(
+                    "GLOSSARY_PREFERENCE",
+                    "WARNING",
+                    f"Thuật ngữ mềm '{warning.source_term}' ưu tiên '{warning.expected_target}' (cho phép: {allowed}).",
+                ))
 
             polarity = PolarityValidator.validate(source, target)
             if polarity.explicit_negation_lost:

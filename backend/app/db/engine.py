@@ -29,6 +29,7 @@ GlobalSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=global
 
 def init_global_db():
     Base.metadata.create_all(bind=global_engine)
+    _apply_additive_project_migrations(global_engine)
 
 
 def get_global_db() -> Generator[Session, None, None]:
@@ -76,7 +77,7 @@ def get_project_engine(project_id: str):
 
 
 def _apply_additive_project_migrations(engine) -> None:
-    """Bổ sung cột Phase 3 cho DB đã tạo mà không xóa hay ghi đè dữ liệu."""
+    """Bổ sung schema additive cho DB cũ mà không xóa hay ghi đè dữ liệu."""
     with engine.begin() as connection:
         tables = {row[0] for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
         if "semantic_reviews" in tables:
@@ -86,6 +87,20 @@ def _apply_additive_project_migrations(engine) -> None:
             connection.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_semantic_reviews_is_stale ON semantic_reviews (is_stale)"
             ))
+        if "glossary" in tables:
+            columns = {row[1] for row in connection.execute(text("PRAGMA table_info(glossary)"))}
+            additive_columns = {
+                "preferred_target": "VARCHAR(255)",
+                "allowed_variants": "JSON",
+                "sense_hint": "TEXT",
+                "domain": "VARCHAR(64) DEFAULT 'GENERAL'",
+                "part_of_speech": "VARCHAR(64)",
+                "preserve_original": "BOOLEAN NOT NULL DEFAULT 0",
+                "lock_level": "VARCHAR(16) DEFAULT 'HARD'",
+            }
+            for column_name, column_type in additive_columns.items():
+                if column_name not in columns:
+                    connection.execute(text(f"ALTER TABLE glossary ADD COLUMN {column_name} {column_type}"))
 
 
 def get_project_db(project_id: str) -> Session:

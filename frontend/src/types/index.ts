@@ -149,6 +149,13 @@ export interface GlossaryItem {
   category: string;
   notes?: string;
   locked: boolean;
+  preferred_target?: string;
+  allowed_variants?: string[];
+  sense_hint?: string;
+  domain?: string;
+  part_of_speech?: string;
+  preserve_original?: boolean;
+  lock_level?: 'HARD' | 'SOFT';
   created_at: string;
 }
 

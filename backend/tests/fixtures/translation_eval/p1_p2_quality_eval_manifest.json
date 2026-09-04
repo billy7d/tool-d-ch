@@ -1,0 +1,11 @@
+{
+  "dataset_version": "p1-p2-vietnamese-quality-eval-v1",
+  "minimum_samples": 200,
+  "offline_sample_count": 220,
+  "domains": ["GENERAL", "BUSINESS", "FINANCE", "SELF_HELP", "TECHNICAL", "ACADEMIC", "LEGAL", "LITERATURE"],
+  "score_dimensions": ["semantic_accuracy", "naturalness", "terminology", "contextual_coherence", "register"],
+  "adversarial_dimensions": ["negation", "double_negation", "modality", "condition", "causality", "percent", "date", "currency", "entity", "pronoun", "long_paragraph", "idiom", "collocation", "passive", "nominalization", "polysemy", "multi_paragraph", "technical_definition", "legal_obligation", "academic_hedging"],
+  "human_evaluation": "p1_p2_human_eval_template.csv",
+  "blind_ab_evaluation": "p1_p2_blind_ab_template.csv",
+  "label_status": "PENDING_HUMAN"
+}

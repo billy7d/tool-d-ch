@@ -128,8 +128,11 @@ class SemanticAssuranceService:
         force_critic: bool = False,
     ) -> SemanticAssuranceResult:
         quality_gate = TranslationQualityGate()
+        glossary_for_validation = getattr(
+            engine, "glossary_validation_terms", engine.locked_glossary or {},
+        )
         quality = quality_gate.validate(
-            node.content, translated_text, engine.locked_glossary or {},
+            node.content, translated_text, glossary_for_validation,
         )
         warning_codes = [
             issue["code"] for issue in quality.issues
@@ -177,7 +180,7 @@ class SemanticAssuranceService:
         total_latency = 0.0
         for repair_index in range(max_repairs + 1):
             candidate_quality = quality_gate.validate(
-                node.content, candidate, engine.locked_glossary or {},
+                node.content, candidate, glossary_for_validation,
             )
             candidate_warning_codes = [
                 issue["code"] for issue in candidate_quality.issues

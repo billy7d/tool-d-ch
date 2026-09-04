@@ -30,7 +30,8 @@ class TranslationPublicationAssuranceService:
     @staticmethod
     def naturalness_enabled(engine) -> bool:
         quality_profile = str(getattr(engine.config, "quality_profile", "BALANCED") or "BALANCED").upper()
-        return quality_profile not in {"OFF", "DETERMINISTIC_ONLY"}
+        quality_tier = str(getattr(engine.config, "quality_tier", "") or "").upper()
+        return quality_profile not in {"OFF", "DETERMINISTIC_ONLY"} and quality_tier != "FAST"
 
     @staticmethod
     def _semantic_node(engine, node):
@@ -384,7 +385,11 @@ class TranslationPublicationAssuranceService:
 
         # Dù deterministic recheck fail, vẫn chạy đủ hai critic theo contract P0;
         # kết quả cuối cùng chỉ được APPROVED khi cả ba tầng đều đạt.
-        rewritten_quality = TranslationQualityGate().validate(semantic_node.content, rewritten, glossary)
+        rewritten_quality = TranslationQualityGate().validate(
+            semantic_node.content,
+            rewritten,
+            getattr(engine, "glossary_validation_terms", glossary),
+        )
         rewritten_entity_issues = EntityLedgerService.validate_locked(
             engine.db, engine.project_id, semantic_node.content, rewritten, glossary,
         )

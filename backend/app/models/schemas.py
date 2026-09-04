@@ -166,6 +166,13 @@ class GlossaryItemCreate(BaseModel):
     category: str = "GENERAL"
     notes: Optional[str] = None
     locked: bool = True
+    preferred_target: Optional[str] = None
+    allowed_variants: List[str] = Field(default_factory=list)
+    sense_hint: Optional[str] = None
+    domain: str = "GENERAL"
+    part_of_speech: Optional[str] = None
+    preserve_original: bool = False
+    lock_level: str = "HARD"
 
 
 class GlossaryItemUpdate(BaseModel):
@@ -174,6 +181,13 @@ class GlossaryItemUpdate(BaseModel):
     category: Optional[str] = None
     notes: Optional[str] = None
     locked: Optional[bool] = None
+    preferred_target: Optional[str] = None
+    allowed_variants: Optional[List[str]] = None
+    sense_hint: Optional[str] = None
+    domain: Optional[str] = None
+    part_of_speech: Optional[str] = None
+    preserve_original: Optional[bool] = None
+    lock_level: Optional[str] = None
 
 
 class GlossaryItemResponse(BaseModel):
@@ -183,6 +197,13 @@ class GlossaryItemResponse(BaseModel):
     category: str
     notes: Optional[str]
     locked: bool
+    preferred_target: Optional[str] = None
+    allowed_variants: List[str] = Field(default_factory=list)
+    sense_hint: Optional[str] = None
+    domain: str = "GENERAL"
+    part_of_speech: Optional[str] = None
+    preserve_original: bool = False
+    lock_level: str = "HARD"
     created_at: datetime
 
 

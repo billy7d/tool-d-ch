@@ -12,23 +12,34 @@ from app.services.translation.semantic_assurance import SemanticAssuranceService
 router = APIRouter(prefix="/api/projects/{project_id}/glossary", tags=["Glossary"])
 
 
+def _glossary_response(item: GlossaryModel) -> GlossaryItemResponse:
+    """Dựng response mới nhưng vẫn trả đủ các trường glossary legacy."""
+    context = GlossaryService.to_context_entry(item)
+    return GlossaryItemResponse(
+        id=item.id,
+        source_term=item.source_term,
+        target_term=item.target_term,
+        category=item.category,
+        notes=item.notes,
+        locked=context["locked"],
+        preferred_target=context["preferred_target"],
+        allowed_variants=context["allowed_variants"],
+        sense_hint=context["sense_hint"],
+        domain=context["domain"],
+        part_of_speech=context["part_of_speech"] or None,
+        preserve_original=context["preserve_original"],
+        lock_level=context["lock_level"],
+        created_at=item.created_at,
+    )
+
+
 @router.get("", response_model=List[GlossaryItemResponse])
 def list_glossary_terms(project_id: str):
     db = get_project_db(project_id)
     repo = GlossaryRepository(db)
     try:
         items = repo.list_glossary(project_id)
-        return [
-            GlossaryItemResponse(
-                id=i.id,
-                source_term=i.source_term,
-                target_term=i.target_term,
-                category=i.category,
-                notes=i.notes,
-                locked=i.locked,
-                created_at=i.created_at
-            ) for i in items
-        ]
+        return [_glossary_response(item) for item in items]
     finally:
         db.close()
 
@@ -44,19 +55,18 @@ def add_glossary_term(project_id: str, payload: GlossaryItemCreate):
             target_term=payload.target_term,
             category=payload.category,
             notes=payload.notes,
-            locked=payload.locked
+            locked=payload.locked,
+            preferred_target=payload.preferred_target,
+            allowed_variants=payload.allowed_variants,
+            sense_hint=payload.sense_hint,
+            domain=payload.domain,
+            part_of_speech=payload.part_of_speech,
+            preserve_original=payload.preserve_original,
+            lock_level=payload.lock_level,
         )
         SemanticAssuranceService.invalidate_for_source_term(db, project_id, item.source_term)
         db.commit()
-        return GlossaryItemResponse(
-            id=item.id,
-            source_term=item.source_term,
-            target_term=item.target_term,
-            category=item.category,
-            notes=item.notes,
-            locked=item.locked,
-            created_at=item.created_at
-        )
+        return _glossary_response(item)
     finally:
         db.close()
 
@@ -75,15 +85,7 @@ def update_glossary_term(project_id: str, term_id: str, payload: GlossaryItemUpd
             SemanticAssuranceService.invalidate_for_source_term(db, project_id, previous_source)
         SemanticAssuranceService.invalidate_for_source_term(db, project_id, item.source_term)
         db.commit()
-        return GlossaryItemResponse(
-            id=item.id,
-            source_term=item.source_term,
-            target_term=item.target_term,
-            category=item.category,
-            notes=item.notes,
-            locked=item.locked,
-            created_at=item.created_at
-        )
+        return _glossary_response(item)
     finally:
         db.close()
 

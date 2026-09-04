@@ -42,6 +42,11 @@ export const apiClient = {
     api.get<CanonicalDocument>(`/projects/${projectId}/structure`).then((r) => r.data),
   updateNode: (projectId: string, nodeId: string, data: any) =>
     api.patch(`/projects/${projectId}/structure/nodes/${nodeId}`, data).then((r) => r.data),
+  approveNode: (projectId: string, nodeId: string, translatedContent: string) =>
+    api.patch(`/projects/${projectId}/structure/nodes/${nodeId}`, {
+      translated_content: translatedContent,
+      approval_status: 'APPROVED',
+    }).then((r) => r.data),
   mergeNextNode: (projectId: string, nodeId: string) =>
     api.post(`/projects/${projectId}/structure/nodes/${nodeId}/merge_next`).then((r) => r.data),
   confirmStructure: (projectId: string) =>

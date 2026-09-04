@@ -63,8 +63,10 @@ class TranslationMode(str, Enum):
 class QALevel(str, Enum):
     OFF = "OFF"
     DETERMINISTIC_ONLY = "DETERMINISTIC_ONLY"
+    FAST = "FAST"
     BALANCED = "BALANCED"
     HIGH_QUALITY = "HIGH_QUALITY"
+    PUBLISHING = "PUBLISHING"
 
 
 class SourceMapping(BaseModel):
