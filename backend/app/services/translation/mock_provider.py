@@ -181,6 +181,7 @@ class MockProvider(TranslationProvider):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        style_hints: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Mock critic có các tín hiệu ổn định để test ranking và editorial flow offline."""
         checks = {key: "PASS" for key in (

@@ -8,9 +8,14 @@ from app.config import settings
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.json_parser import parse_translation_batch_strict
 from app.services.qa.result_validator import qa_error, validate_qa_result
+from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
 
 
 class OllamaProvider(TranslationProvider):
+    # Tiếng Việt lặp hư từ ("của", "các", "được"...) rất dày; phạt nặng sẽ đẩy model sang từ
+    # đồng nghĩa gượng hoặc Hán-Việt. Vòng lặp thoái hóa đã có deduplicate_repetitions xử lý.
+    VIETNAMESE_REPEAT_PENALTY = 1.05
+
     def __init__(self, base_url: str = settings.DEFAULT_OLLAMA_URL, default_model: str = settings.DEFAULT_MODEL):
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
@@ -66,7 +71,7 @@ class OllamaProvider(TranslationProvider):
             "options": {
                 "temperature": temperature,
                 "top_p": 0.9,
-                "repeat_penalty": 1.1,
+                "repeat_penalty": self.VIETNAMESE_REPEAT_PENALTY,
                 "num_ctx": self.effective_context_window(target_model),
             }
         }
@@ -133,7 +138,7 @@ class OllamaProvider(TranslationProvider):
             "options": {
                 "temperature": temperature,
                 "top_p": 0.85,
-                "repeat_penalty": 1.25,
+                "repeat_penalty": self.VIETNAMESE_REPEAT_PENALTY,
                 "num_ctx": self.effective_context_window(target_model),
             }
         }
@@ -200,7 +205,7 @@ class OllamaProvider(TranslationProvider):
             "options": {
                 "temperature": 0.15,
                 "top_p": 0.85,
-                "repeat_penalty": 1.25,
+                "repeat_penalty": self.VIETNAMESE_REPEAT_PENALTY,
                 "num_ctx": self.effective_context_window(target_model),
             }
         }
@@ -396,6 +401,7 @@ class OllamaProvider(TranslationProvider):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        style_hints: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         target_model = model or self.default_model
         system_message = (
@@ -405,8 +411,9 @@ class OllamaProvider(TranslationProvider):
             "author in the stated domain when the English source is hidden. Check literal calques, English word "
             "order, collocation, cohesion, pronoun/reference, register, redundancy, nominalization, unnecessary "
             "passive voice and sentence flow. Formal legal, technical and academic style is acceptable when it is "
-            "appropriate and semantically precise. Return strict JSON only with status PASS or FAIL, score 0..1, "
-            "the ten required checks, and issues. Each issue must contain type, severity, target_span and message."
+            "appropriate and semantically precise. " + CRITIC_STYLE_HINT_INSTRUCTION + " Return strict JSON only "
+            "with status PASS or FAIL, score 0..1, the ten required checks, and issues. Each issue must contain "
+            "type, severity, target_span and message."
         )
         user_message = json.dumps({
             "source": source_text,
@@ -417,6 +424,7 @@ class OllamaProvider(TranslationProvider):
             "previous_bilingual_context": previous_context or [],
             "relevant_glossary": glossary_terms or {},
             "relevant_entities": entity_context or {},
+            "deterministic_style_hints": style_hints or [],
             "required_check_names": [
                 "literal_calque", "word_order", "collocation", "cohesion", "pronoun_reference",
                 "register", "redundancy", "nominalization", "passive_voice", "sentence_flow",

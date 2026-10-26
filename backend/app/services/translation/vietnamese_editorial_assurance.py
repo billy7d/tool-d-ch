@@ -6,12 +6,14 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from app.db.models import NodeModel, QAIssueModel
 from app.services.qa.vietnamese_naturalness_critic import (
+    NATURALNESS_CHECKS,
     NATURALNESS_PASS_THRESHOLD,
     NATURALNESS_REWRITE_THRESHOLD,
     VietnameseNaturalnessCritic,
     VietnameseNaturalnessResult,
     naturalness_result_to_qa_issues,
 )
+from app.services.qa.vietnamese_style_lint import StyleLintIssue
 from app.services.translation.entity_ledger import EntityLedgerService
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.semantic_assurance import SemanticAssuranceResult, SemanticAssuranceService
@@ -139,6 +141,21 @@ class TranslationPublicationAssuranceService:
         return True
 
     @staticmethod
+    def _rewrite_issues(naturalness: VietnameseNaturalnessResult) -> List[Dict[str, Any]]:
+        """Bổ sung span cụ thể từ lint, nhưng chỉ ở nhóm lỗi mà critic đã xác nhận FAIL."""
+        issues = list(naturalness.issues)
+        failed_types = {key.upper() for key in NATURALNESS_CHECKS if naturalness.checks.get(key) == "FAIL"}
+        failed_types |= {str(item.get("type", "")).upper() for item in issues}
+        covered = {str(item.get("target_span", "")) for item in issues}
+        for hint in naturalness.lint_issues:
+            if hint.get("severity") != "WARNING" or hint.get("type") not in failed_types:
+                continue
+            if hint.get("target_span") in covered:
+                continue
+            issues.append(StyleLintIssue(**hint).to_naturalness_issue())
+        return issues
+
+    @staticmethod
     def _attach_naturalness(
         result: SemanticAssuranceResult,
         naturalness: VietnameseNaturalnessResult,
@@ -172,6 +189,7 @@ class TranslationPublicationAssuranceService:
             "critic_request_tokens": result.critic_request_tokens,
             "critic_latency_ms": result.critic_latency_ms,
             "critic_calls": result.critic_calls,
+            "lint_issues": result.lint_issues,
         }
 
     @classmethod
@@ -319,6 +337,7 @@ class TranslationPublicationAssuranceService:
             cls._persist_naturalness_rejected(engine, node, rejected, naturalness)
             return rejected
 
+        rewrite_issues = cls._rewrite_issues(naturalness)
         rewritten = ""
         rewrite_error = "Editorial rewrite không trả về candidate hợp lệ."
         rewrite_latency = 0.0
@@ -330,7 +349,7 @@ class TranslationPublicationAssuranceService:
             rewritten = engine.provider.editorial_rewrite(
                 source_text=semantic_node.content,
                 current_translation=result.translated_text,
-                naturalness_issues=naturalness.issues,
+                naturalness_issues=rewrite_issues,
                 document_type=str(getattr(config, "document_type", "GENERAL") or "GENERAL"),
                 register=str(getattr(config, "register", "") or ""),
                 sentence_style=str(getattr(config, "sentence_style", "MODERATE") or "MODERATE"),
@@ -346,7 +365,7 @@ class TranslationPublicationAssuranceService:
                     f"PROMPT VERSION {EDITORIAL_REWRITE_PROMPT_VERSION}: Edit the Vietnamese, not the meaning. "
                     "Do not add, omit or change numbers, negation, modality, causality, scope, conditions, entities, "
                     "references or locked terminology. Naturalness issues: "
-                    + json.dumps(naturalness.issues, ensure_ascii=False)
+                    + json.dumps(rewrite_issues, ensure_ascii=False)
                 )
                 rewritten = engine.provider.revise(
                     semantic_node.content, result.translated_text, instruction_text,

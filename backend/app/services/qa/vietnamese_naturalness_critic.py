@@ -4,10 +4,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
+from app.services.qa.vietnamese_style_lint import VietnameseStyleLint
 from app.services.translation.context_assembler import estimate_tokens
 
 
-NATURALNESS_CRITIC_PROMPT_VERSION = "vietnamese-naturalness-critic-v1"
+# v2: critic nhận thêm deterministic_style_hints từ VietnameseStyleLint.
+NATURALNESS_CRITIC_PROMPT_VERSION = "vietnamese-naturalness-critic-v2"
 NATURALNESS_PASS_THRESHOLD = 0.80
 NATURALNESS_REWRITE_THRESHOLD = 0.55
 
@@ -77,6 +79,8 @@ class VietnameseNaturalnessResult:
     critic_latency_ms: float = 0.0
     critic_calls: int = 1
     signature: str = ""
+    # Kết quả lint deterministic; chỉ là gợi ý, không tham gia quyết định PASS.
+    lint_issues: List[Dict[str, Any]] = field(default_factory=list)
 
     def passed(self, threshold: float = NATURALNESS_PASS_THRESHOLD) -> bool:
         """Chỉ PASS khi provider và ngưỡng điểm đều đạt."""
@@ -113,6 +117,7 @@ class VietnameseNaturalnessResult:
             "critic_latency_ms": self.critic_latency_ms,
             "critic_calls": self.critic_calls,
             "signature": self.signature,
+            "lint_issues": self.lint_issues,
         }
 
 
@@ -241,6 +246,10 @@ class VietnameseNaturalnessCritic:
         selected_previous = _normalize_previous_context(previous_context)
         selected_glossary = dict(glossary_terms or {})
         selected_entities = dict(entity_context or {})
+        lint_issues = [
+            item.to_hint() for item in VietnameseStyleLint.lint(translated_text, source_text, document_type)
+        ]
+        selected_hints = list(lint_issues)
         signature = naturalness_signature(
             source_text, translated_text, document_type, register, sentence_style,
             selected_glossary, selected_entities, model, selected_previous,
@@ -258,6 +267,7 @@ class VietnameseNaturalnessCritic:
                 + estimate_tokens(json.dumps(selected_previous, ensure_ascii=False))
                 + estimate_tokens(json.dumps(selected_glossary, ensure_ascii=False))
                 + estimate_tokens(json.dumps(selected_entities, ensure_ascii=False))
+                + estimate_tokens(json.dumps(selected_hints, ensure_ascii=False))
                 + estimate_tokens(str(document_type))
                 + estimate_tokens(str(register))
                 + estimate_tokens(str(sentence_style))
@@ -267,6 +277,9 @@ class VietnameseNaturalnessCritic:
         request_size = request_tokens()
         if request_size > limit and selected_previous:
             selected_previous = []
+            request_size = request_tokens()
+        if request_size > limit and selected_hints:
+            selected_hints = []
             request_size = request_tokens()
         if request_size > limit and selected_entities:
             selected_entities = {}
@@ -285,7 +298,7 @@ class VietnameseNaturalnessCritic:
                     "target_span": "",
                     "message": message,
                 }],
-                {}, message, request_size, 0.0, 0, signature,
+                {}, message, request_size, 0.0, 0, signature, lint_issues,
             )
 
         started = time.perf_counter()
@@ -300,11 +313,12 @@ class VietnameseNaturalnessCritic:
                 glossary_terms=selected_glossary,
                 entity_context=selected_entities,
                 model=model,
+                style_hints=selected_hints,
             )
             result = validate_naturalness_result(raw)
             return VietnameseNaturalnessResult(
                 result.status, result.score, result.issues, result.checks, result.error,
-                request_size, (time.perf_counter() - started) * 1000, 1, signature,
+                request_size, (time.perf_counter() - started) * 1000, 1, signature, lint_issues,
             )
         except Exception as exc:
             message = str(exc)
@@ -317,7 +331,7 @@ class VietnameseNaturalnessCritic:
                     "target_span": "",
                     "message": message,
                 }],
-                {}, message, request_size, (time.perf_counter() - started) * 1000, 1, signature,
+                {}, message, request_size, (time.perf_counter() - started) * 1000, 1, signature, lint_issues,
             )
 
 

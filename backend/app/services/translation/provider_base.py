@@ -130,9 +130,10 @@ class TranslationProvider(ABC):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        style_hints: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Đánh giá độ tự nhiên; provider cũ không được âm thầm coi là đạt."""
-        raise NotImplementedError("Provider chưa hỗ trợ vietnamese-naturalness-critic-v1")
+        raise NotImplementedError("Provider chưa hỗ trợ vietnamese naturalness critic")
 
     def editorial_rewrite(
         self,

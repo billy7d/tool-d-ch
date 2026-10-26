@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.json_parser import parse_translation_batch_strict
 from app.services.qa.result_validator import qa_error, validate_qa_result
+from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
 
 
 class OpenAILocalProvider(TranslationProvider):
@@ -294,6 +295,7 @@ class OpenAILocalProvider(TranslationProvider):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        style_hints: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         target_model = model or self.default_model
         system_message = (
@@ -301,8 +303,8 @@ class OpenAILocalProvider(TranslationProvider):
             "quality only and do not rewrite. Accept faithful non-literal Vietnamese. Check literal_calque, "
             "word_order, collocation, cohesion, pronoun_reference, register, redundancy, nominalization, "
             "passive_voice and sentence_flow. Do not penalize appropriate formal legal, technical or academic "
-            "style. Return strict JSON only with status PASS or FAIL, score 0..1, all ten checks, and issues "
-            "containing type, severity, target_span and message."
+            "style. " + CRITIC_STYLE_HINT_INSTRUCTION + " Return strict JSON only with status PASS or FAIL, "
+            "score 0..1, all ten checks, and issues containing type, severity, target_span and message."
         )
         user_message = json.dumps({
             "source": source_text,
@@ -313,6 +315,7 @@ class OpenAILocalProvider(TranslationProvider):
             "previous_bilingual_context": previous_context or [],
             "relevant_glossary": glossary_terms or {},
             "relevant_entities": entity_context or {},
+            "deterministic_style_hints": style_hints or [],
         }, ensure_ascii=False)
         payload = {
             "model": target_model,
