@@ -89,6 +89,17 @@ def summarize_evaluations(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
         items,
         lambda row: bool(row.get("deterministic_error") or row.get("quality_gate_error")),
     )
+    # Metric lint deterministic: so sánh được giữa các lần chạy mà không cần người chấm.
+    linted = [row for row in items if isinstance(row.get("lint_warnings"), (int, float))]
+    lint_words = _sum_numeric(linted, ("word_count",))
+    metrics["lint_warnings_per_1000_words"] = (
+        round(_sum_numeric(linted, ("lint_warnings",)) * 1000 / lint_words, 3) if lint_words else None
+    )
+    metrics["lint_clean_rate"] = _rate(linted, lambda row: row["lint_warnings"] == 0) if linted else None
+    critic_rows = [row for row in items if row.get("naturalness_status")]
+    metrics["naturalness_first_pass_rate"] = (
+        _rate(critic_rows, lambda row: str(row["naturalness_status"]).upper() == "PASS") if critic_rows else None
+    )
     metrics["rated_samples"] = sum(
         1 for row in items if all(isinstance(row.get(field_name), (int, float)) for field_name in SCORE_FIELDS)
     )
@@ -139,6 +150,7 @@ def compare_regression(
     *,
     naturalness_tolerance: float = 0.02,
     max_provider_calls_per_node: Optional[float] = None,
+    lint_tolerance_per_1000_words: float = 1.0,
 ) -> Dict[str, Any]:
     """Regression gate: semantic critical 0, naturalness tối đa giảm 2 điểm phần trăm."""
     baseline_semantic = float(baseline.get("semantic_critical_error_rate", 0.0) or 0.0)
@@ -151,6 +163,8 @@ def compare_regression(
     if configured_limit is None:
         configured_limit = baseline.get("configured_max_provider_calls_per_node")
     candidate_calls = candidate.get("median_provider_calls_per_node")
+    baseline_lint = baseline.get("lint_warnings_per_1000_words")
+    candidate_lint = candidate.get("lint_warnings_per_1000_words")
     checks = {
         "semantic_critical_tolerance_zero": {
             "passed": candidate_semantic <= baseline_semantic,
@@ -175,6 +189,14 @@ def compare_regression(
             "baseline": baseline.get("median_provider_calls_per_node"),
             "candidate": candidate_calls,
             "configured_limit": configured_limit,
+        },
+        "style_lint_no_regression": {
+            # Chỉ chặn khi cả hai phía đều có số liệu lint.
+            "passed": baseline_lint is None or candidate_lint is None
+            or float(candidate_lint) <= float(baseline_lint) + lint_tolerance_per_1000_words,
+            "baseline": baseline_lint,
+            "candidate": candidate_lint,
+            "tolerance": lint_tolerance_per_1000_words,
         },
     }
     return {"passed": all(check["passed"] for check in checks.values()), "checks": checks}

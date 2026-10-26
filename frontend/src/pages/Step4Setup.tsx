@@ -16,7 +16,8 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
-import { Project, GlossaryItem, TranslationMode, DocumentType, HardwareInfo, TranslationPreviewResponse } from '../types';
+import { Project, GlossaryItem, TranslationMode, DocumentType, HardwareInfo, TranslationPreviewResponse, AddressTerms } from '../types';
+import { StyleConsistencyPanel } from '../components/StyleConsistencyPanel';
 
 interface Step4SetupProps {
   project: Project;
@@ -35,6 +36,8 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
   const [extracting, setExtracting] = useState(false);
   const [register, setRegister] = useState<string>((project.style_guide?.register as string) || 'ACCESSIBLE');
   const [sentenceStyle, setSentenceStyle] = useState<string>((project.style_guide?.sentence_style as string) || 'MODERATE');
+  const [addressTerms, setAddressTerms] = useState<AddressTerms>((project.style_guide?.address_terms as AddressTerms) || {});
+  const [criticModel, setCriticModel] = useState<string>((project.style_guide?.naturalness_critic_model as string) || '');
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TranslationPreviewResponse | null>(null);
 
@@ -59,6 +62,26 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
     fetchGlossary();
   }, [project.id]);
 
+  const buildStyleGuide = () => {
+    // Bỏ các dòng xưng hô nhập dở để backend không nhận mục rỗng.
+    const pairs = (addressTerms.pairs || []).filter((p) => p.speaker && p.listener && p.self && p.other);
+    const characters = Object.fromEntries(
+      Object.entries(addressTerms.characters || {}).filter(([name, term]) => name.trim() && term.trim()),
+    );
+    const guide: Record<string, any> = {
+      ...(project.style_guide || {}),
+      register,
+      sentence_style: sentenceStyle,
+      address_terms: { ...addressTerms, pairs, characters },
+    };
+    if (criticModel) {
+      guide.naturalness_critic_model = criticModel;
+    } else {
+      delete guide.naturalness_critic_model;
+    }
+    return guide;
+  };
+
   const handleSaveSetup = async () => {
     try {
       await apiClient.updateProject(project.id, {
@@ -66,7 +89,7 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
         document_type: documentType,
         selected_model: selectedModel,
         custom_instructions: customInstructions,
-        style_guide: { ...(project.style_guide || {}), register, sentence_style: sentenceStyle },
+        style_guide: buildStyleGuide(),
       });
       onRefreshProject();
       onNext();
@@ -101,7 +124,7 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
         document_type: documentType,
         selected_model: selectedModel,
         custom_instructions: customInstructions,
-        style_guide: { ...(project.style_guide || {}), register, sentence_style: sentenceStyle },
+        style_guide: buildStyleGuide(),
       });
       onRefreshProject();
       alert('Đã chấp nhận và lưu phong cách dịch thử.');
@@ -391,6 +414,17 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
           </div>
         </div>
       </div>
+
+      <StyleConsistencyPanel
+        projectId={project.id}
+        documentType={documentType}
+        addressTerms={addressTerms}
+        onAddressTermsChange={setAddressTerms}
+        selectedModel={selectedModel}
+        criticModel={criticModel}
+        onCriticModelChange={setCriticModel}
+        installedModels={hardware?.installed_models || []}
+      />
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
         <div className="flex items-center justify-between gap-4">

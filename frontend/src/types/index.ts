@@ -270,3 +270,26 @@ export interface HardwareInfo {
   calibre_available: boolean;
   recommended_preset: string;
 }
+
+export interface AddressPair {
+  speaker: string;
+  listener: string;
+  self: string;
+  other: string;
+  note?: string;
+}
+
+export interface AddressTerms {
+  reader?: string;
+  narrator?: string;
+  characters?: Record<string, string>;
+  pairs?: AddressPair[];
+}
+
+export interface StyleRule {
+  id: string;
+  avoid: string;
+  prefer: string;
+  occurrences: number;
+  status: 'CANDIDATE' | 'ACTIVE' | 'DISABLED';
+}

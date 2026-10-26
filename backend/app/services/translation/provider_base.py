@@ -3,6 +3,33 @@ from typing import List, Dict, Any, Optional
 from app.services.translation.model_capabilities import ModelCapabilities, get_model_capabilities
 
 
+PAIRWISE_NATURALNESS_SYSTEM_PROMPT = (
+    "You compare two Vietnamese translations of the same English source for Vietnamese naturalness only. "
+    "If one candidate adds, drops or changes information, prefer the other. Otherwise prefer the one a "
+    "Vietnamese editor would publish as is. Return strict JSON only: "
+    '{"preferred": "A" | "B" | "TIE", "reason": "<short reason>"}.'
+)
+
+
+_QUOTE_CHARS = "\"“”"
+
+
+def unwrap_quoted_output(content: str, source_text: str) -> str:
+    """Bỏ cặp ngoặc model bọc quanh cả bản dịch, nhưng không đụng tới lời thoại thật.
+
+    Trước đây mọi output bắt đầu và kết thúc bằng ngoặc kép đều bị cắt, nên đoạn thoại kiểu
+    `"Anh về rồi," cô nói. "Em đã chờ."` mất dấu mở và dấu đóng.
+    """
+    wrapped = (content.startswith('"') and content.endswith('"')) or (content.startswith("“") and content.endswith("”"))
+    if not wrapped or len(content) < 2:
+        return content
+    source = (source_text or "").strip()
+    inner = content[1:-1]
+    if source[:1] in _QUOTE_CHARS or any(char in inner for char in _QUOTE_CHARS):
+        return content
+    return inner.strip()
+
+
 class TranslationProvider(ABC):
     def configure_context_window(self, context_window: int) -> None:
         """Khóa context provider theo ngân sách mà engine đã tính."""
@@ -131,6 +158,7 @@ class TranslationProvider(ABC):
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
         style_hints: Optional[List[Dict[str, Any]]] = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Đánh giá độ tự nhiên; provider cũ không được âm thầm coi là đạt."""
         raise NotImplementedError("Provider chưa hỗ trợ vietnamese naturalness critic")
@@ -146,6 +174,20 @@ class TranslationProvider(ABC):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        previous_context: Any = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Viết lại có kiểm soát; mặc định từ chối để tránh fallback không an toàn."""
-        raise NotImplementedError("Provider chưa hỗ trợ editorial-rewrite-v1")
+        raise NotImplementedError("Provider chưa hỗ trợ editorial rewrite")
+
+    def compare_naturalness(
+        self,
+        source_text: str,
+        candidate_a: str,
+        candidate_b: str,
+        document_type: str = "GENERAL",
+        register: str = "",
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """So sánh cặp A/B; mô hình nhỏ chọn A/B đáng tin hơn chấm điểm tuyệt đối."""
+        raise NotImplementedError("Provider chưa hỗ trợ pairwise naturalness")

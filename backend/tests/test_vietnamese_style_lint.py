@@ -91,8 +91,10 @@ def test_critic_forwards_lint_hints_and_keeps_them_on_result():
     )
     assert [hint["rule"] for hint in captured["style_hints"]] == ["PASSIVE_BY_AGENT"]
     assert [hint["rule"] for hint in result.lint_issues] == ["PASSIVE_BY_AGENT"]
-    # Lint chỉ là gợi ý: critic PASS thì kết quả vẫn PASS.
-    assert result.passed()
+    # Lint là tín hiệu chính: critic PASS nhưng lint có WARNING thì lật thành FAIL trong vùng được rewrite.
+    assert result.verdict_source == "LINT_OVERRIDE"
+    assert result.status == "FAIL" and result.rewrite_allowed()
+    assert result.checks["passive_voice"] == "FAIL"
 
 
 def _result_with(checks_failed, lint_rules):

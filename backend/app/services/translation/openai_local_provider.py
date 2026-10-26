@@ -8,6 +8,8 @@ from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.json_parser import parse_translation_batch_strict
 from app.services.qa.result_validator import qa_error, validate_qa_result
 from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
+from app.services.translation.address_terms import ADDRESS_TERMS_CRITIC_INSTRUCTION, ADDRESS_TERMS_REWRITE_INSTRUCTION
+from app.services.translation.provider_base import PAIRWISE_NATURALNESS_SYSTEM_PROMPT, unwrap_quoted_output
 
 
 class OpenAILocalProvider(TranslationProvider):
@@ -132,8 +134,7 @@ class OpenAILocalProvider(TranslationProvider):
                 if content.startswith("```") and content.endswith("```"):
                     content = re.sub(r'^```[a-zA-Z]*\n?', '', content)
                     content = re.sub(r'\n?```$', '', content).strip()
-                if (content.startswith('"') and content.endswith('"')) or (content.startswith('“') and content.endswith('”')):
-                    content = content[1:-1].strip()
+                content = unwrap_quoted_output(content, text)
                 return content
             else:
                 raise RuntimeError(f"OpenAI Local error {res.status_code}: {res.text}")
@@ -160,8 +161,7 @@ class OpenAILocalProvider(TranslationProvider):
                 if content.startswith("```") and content.endswith("```"):
                     content = re.sub(r'^```[a-zA-Z]*\n?', '', content)
                     content = re.sub(r'\n?```$', '', content).strip()
-                if (content.startswith('"') and content.endswith('"')) or (content.startswith('“') and content.endswith('”')):
-                    content = content[1:-1].strip()
+                content = unwrap_quoted_output(content, source_text)
                 return content
         except Exception as e:
             print(f"[OpenAILocalProvider.revise] Error: {e}")
@@ -296,6 +296,7 @@ class OpenAILocalProvider(TranslationProvider):
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
         style_hints: Optional[List[Dict[str, Any]]] = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         target_model = model or self.default_model
         system_message = (
@@ -303,7 +304,8 @@ class OpenAILocalProvider(TranslationProvider):
             "quality only and do not rewrite. Accept faithful non-literal Vietnamese. Check literal_calque, "
             "word_order, collocation, cohesion, pronoun_reference, register, redundancy, nominalization, "
             "passive_voice and sentence_flow. Do not penalize appropriate formal legal, technical or academic "
-            "style. " + CRITIC_STYLE_HINT_INSTRUCTION + " Return strict JSON only with status PASS or FAIL, "
+            "style. " + CRITIC_STYLE_HINT_INSTRUCTION + " " + ADDRESS_TERMS_CRITIC_INSTRUCTION
+            + " Return strict JSON only with status PASS or FAIL, "
             "score 0..1, all ten checks, and issues containing type, severity, target_span and message."
         )
         user_message = json.dumps({
@@ -316,6 +318,7 @@ class OpenAILocalProvider(TranslationProvider):
             "relevant_glossary": glossary_terms or {},
             "relevant_entities": entity_context or {},
             "deterministic_style_hints": style_hints or [],
+            "address_terms": address_terms or {},
         }, ensure_ascii=False)
         payload = {
             "model": target_model,
@@ -344,13 +347,16 @@ class OpenAILocalProvider(TranslationProvider):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        previous_context: Any = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> str:
         target_model = model or self.default_model
         system_message = (
             "You are a careful Vietnamese editorial translator. Edit the Vietnamese, not the meaning. Return "
             "only revised Vietnamese plain text. Keep every proposition, number, negation, modality, causality, "
             "condition, scope, entity, reference and locked term from the original source. Do not add, omit or "
-            "reinterpret information. Only improve syntax, collocation, cohesion, pronouns and literal phrasing."
+            "reinterpret information. Only improve syntax, collocation, cohesion, pronouns and literal phrasing. "
+            + ADDRESS_TERMS_REWRITE_INSTRUCTION
         )
         user_message = json.dumps({
             "ORIGINAL_SOURCE": source_text,
@@ -361,6 +367,8 @@ class OpenAILocalProvider(TranslationProvider):
             "SENTENCE_STYLE": sentence_style,
             "LOCKED_GLOSSARY": glossary_terms or {},
             "RELEVANT_ENTITIES": entity_context or {},
+            "ADDRESS_TERMS": address_terms or {},
+            "PREVIOUS_BILINGUAL_CONTEXT": previous_context or [],
             "INSTRUCTION": "Edit the Vietnamese, not the meaning.",
         }, ensure_ascii=False)
         payload = {
@@ -381,3 +389,35 @@ class OpenAILocalProvider(TranslationProvider):
             content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
             content = re.sub(r"\n?```$", "", content).strip()
         return content
+
+    def compare_naturalness(
+        self,
+        source_text: str,
+        candidate_a: str,
+        candidate_b: str,
+        document_type: str = "GENERAL",
+        register: str = "",
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_model = model or self.default_model
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": PAIRWISE_NATURALNESS_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps({
+                    "source": source_text,
+                    "candidate_a": candidate_a,
+                    "candidate_b": candidate_b,
+                    "document_type": document_type,
+                    "register": register,
+                }, ensure_ascii=False)},
+            ],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+        }
+        response = self.session.post(
+            f"{self.base_url}/chat/completions", headers=self._headers(), json=payload, timeout=60.0,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"OpenAI Local pairwise naturalness HTTP {response.status_code}: {response.text[:200]}")
+        return json.loads(response.json()["choices"][0]["message"]["content"])

@@ -10,6 +10,7 @@ import {
   SemanticSummary,
   SemanticReview,
   EntityDecision,
+  StyleRule,
 } from '../types';
 
 const api = axios.create({
@@ -85,8 +86,14 @@ export const apiClient = {
   importGlossaryCsv: (projectId: string, formData: FormData) =>
     api.post(`/projects/${projectId}/glossary/import_csv`, formData).then((r) => r.data),
 
+  // Style rules learned from editor corrections
+  getStyleRules: (projectId: string) =>
+    api.get<StyleRule[]>(`/projects/${projectId}/style/rules`).then((r) => r.data),
+  updateStyleRule: (projectId: string, ruleId: string, status: StyleRule['status']) =>
+    api.patch<StyleRule>(`/projects/${projectId}/style/rules/${ruleId}`, { status }).then((r) => r.data),
+
   // QA
-  runQA: (projectId: string, enableAiQa: boolean = false, enableNaturalness: boolean = true) =>
+  runQA:(projectId: string, enableAiQa: boolean = false, enableNaturalness: boolean = true) =>
     api.post(`/projects/${projectId}/qa/run?enable_ai_qa=${enableAiQa}&enable_naturalness=${enableNaturalness}`).then((r) => r.data),
   getQAIssues: (projectId: string, status?: string) =>
     api.get<QAIssue[]>(`/projects/${projectId}/qa/issues`, { params: { status } }).then((r) => r.data),

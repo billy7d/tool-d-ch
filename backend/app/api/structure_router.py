@@ -11,6 +11,7 @@ from app.models.schemas import NodeUpdate, StructureConfirmRequest
 from app.services.translation.contextual_engine import ContextualTranslationEngine
 from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.style_memory import StyleMemoryService
+from app.services.translation.style_rules import StyleRuleService
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.worker import translation_worker
 
@@ -70,7 +71,16 @@ def update_node(project_id: str, node_id: str, payload: NodeUpdate):
             except Exception as exc:
                 # Không để lỗi style memory làm mất thao tác duyệt node đã lưu.
                 style_memory = {"ingested": False, "reason": "STYLE_MEMORY_VERIFICATION_ERROR", "detail": str(exc)}
-        return {"message": "Cập nhật thành công", "node_id": node_id, "style_memory": style_memory}
+            try:
+                # Chênh lệch giữa bản AI và bản người duyệt là tín hiệu văn phong mạnh nhất của project.
+                learned = StyleRuleService.observe_approved_node(db, project_id, updated)
+                style_rules = {"observed": len(learned), "activated": [rule.avoid for rule in learned if rule.status == "ACTIVE"]}
+            except Exception as exc:
+                db.rollback()
+                style_rules = {"observed": 0, "error": str(exc)}
+        else:
+            style_rules = {"observed": 0}
+        return {"message": "Cập nhật thành công", "node_id": node_id, "style_memory": style_memory, "style_rules": style_rules}
     finally:
         db.close()
 

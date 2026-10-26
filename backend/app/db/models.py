@@ -226,6 +226,27 @@ class StyleMemoryModel(Base):
     )
 
 
+class StyleRuleModel(Base):
+    """Quy tắc văn phong rút ra từ các lần người biên tập sửa bản dịch AI."""
+
+    __tablename__ = "style_rules"
+
+    id = Column(String(64), primary_key=True)
+    project_id = Column(String(64), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    avoid = Column(String(200), nullable=False)
+    prefer = Column(String(200), nullable=False, default="")
+    # Mỗi node chỉ được tính một lần để autosave/duyệt lại không thổi phồng số lần.
+    node_ids = Column(JSON, default=list)
+    occurrences = Column(Integer, default=0)
+    status = Column(String(16), default="CANDIDATE")  # CANDIDATE, ACTIVE, DISABLED
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "avoid", "prefer", name="uq_style_rule"),
+    )
+
+
 class QAIssueModel(Base):
     __tablename__ = "qa_issues"
 

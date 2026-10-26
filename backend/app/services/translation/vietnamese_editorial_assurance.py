@@ -10,13 +10,16 @@ from app.services.qa.vietnamese_naturalness_critic import (
     NATURALNESS_PASS_THRESHOLD,
     NATURALNESS_REWRITE_THRESHOLD,
     VietnameseNaturalnessCritic,
+    compare_original_and_rewrite,
     VietnameseNaturalnessResult,
     naturalness_result_to_qa_issues,
 )
 from app.services.qa.vietnamese_style_lint import StyleLintIssue
+from app.services.translation.address_terms import AddressTermLedger
 from app.services.translation.entity_ledger import EntityLedgerService
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.semantic_assurance import SemanticAssuranceResult, SemanticAssuranceService
+from app.services.translation.style_rules import StyleRuleService
 from app.services.qa.semantic_critic import semantic_signature
 from app.services.translation.translation_commit import TranslationCommitService
 from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
@@ -75,7 +78,23 @@ class TranslationPublicationAssuranceService:
             "entity_context": EntityLedgerService.relevant_decisions(
                 engine.db, engine.project_id, semantic_node.content, glossary,
             ),
+            "address_ledger": cls._address_ledger(engine, semantic_node.content or ""),
         }
+
+    @staticmethod
+    def _address_ledger(engine, source_text: str) -> AddressTermLedger:
+        if hasattr(engine, "address_terms_for"):
+            return engine.address_terms_for(source_text)
+        config = getattr(engine, "config", None)
+        return AddressTermLedger.from_style_guide(
+            getattr(config, "style_guide", {}) or {}, str(getattr(config, "document_type", "GENERAL") or "GENERAL"),
+        ).relevant(source_text)
+
+    @staticmethod
+    def _project_hints(engine, ledger: AddressTermLedger, source_text: str, translated_text: str) -> List[Dict[str, Any]]:
+        """Hint riêng của project: sai xưng hô với người đọc và cụm người biên tập hay sửa."""
+        rules = engine.project_style_rules() if hasattr(engine, "project_style_rules") else []
+        return ledger.check(source_text, translated_text) + StyleRuleService.lint(rules, translated_text)
 
     @classmethod
     def _review_naturalness(
@@ -86,8 +105,10 @@ class TranslationPublicationAssuranceService:
         translated_text: str,
     ) -> VietnameseNaturalnessResult:
         config = engine.config
+        pass_threshold, rewrite_threshold = cls._thresholds(engine)
         try:
             context = cls._naturalness_context(engine, chapter, node)
+            ledger = context["address_ledger"]
             return VietnameseNaturalnessCritic.review(
                 provider=engine.provider,
                 source_text=node.content,
@@ -102,6 +123,11 @@ class TranslationPublicationAssuranceService:
                     getattr(config, "naturalness_critic_model", None)
                     or getattr(config, "model_name", "")
                 ),
+                address_terms=ledger.to_payload() if not ledger.is_empty else None,
+                extra_hints=cls._project_hints(engine, ledger, node.content or "", translated_text),
+                pass_threshold=pass_threshold,
+                rewrite_threshold=rewrite_threshold,
+                lint_fallback=bool((getattr(config, "style_guide", {}) or {}).get("naturalness_lint_fallback", True)),
             )
         except Exception as exc:
             # Lỗi khi dựng context cũng phải ERROR/fail-closed thay vì làm rơi cả worker.
@@ -178,8 +204,26 @@ class TranslationPublicationAssuranceService:
         )
 
     @staticmethod
-    def _naturalness_payload(result: VietnameseNaturalnessResult, pass_threshold: float) -> Dict[str, Any]:
+    def critic_self_review(engine) -> bool:
+        """Critic trùng model dịch dễ thiên vị bản của chính nó; ghi lại để audit và UI cảnh báo."""
+        config = engine.config
+        model = str(getattr(config, "model_name", "") or "")
+        critic = str(getattr(config, "naturalness_critic_model", None) or model)
+        return bool(model) and critic == model
+
+    @staticmethod
+    def _pairwise_guard_enabled(engine) -> bool:
+        style_guide = getattr(engine.config, "style_guide", {}) or {}
+        return bool(style_guide.get("naturalness_pairwise_guard", True))
+
+    @staticmethod
+    def _naturalness_payload(
+        result: VietnameseNaturalnessResult,
+        pass_threshold: float,
+        critic_self_review: bool = False,
+    ) -> Dict[str, Any]:
         return {
+            "critic_self_review": critic_self_review,
             "status": result.status,
             "score": result.score,
             "pass_threshold": pass_threshold,
@@ -190,6 +234,8 @@ class TranslationPublicationAssuranceService:
             "critic_latency_ms": result.critic_latency_ms,
             "critic_calls": result.critic_calls,
             "lint_issues": result.lint_issues,
+            "verdict_source": result.verdict_source,
+            "schema_repairs": result.schema_repairs,
         }
 
     @classmethod
@@ -322,7 +368,7 @@ class TranslationPublicationAssuranceService:
                 resolved_issue_ids=resolved_issue_ids,
                 semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
                 latency_ms=latency_ms,
-                naturalness_result=cls._naturalness_payload(naturalness, pass_threshold),
+                naturalness_result=cls._naturalness_payload(naturalness, pass_threshold, cls.critic_self_review(engine)),
             )
             return approved
 
@@ -356,6 +402,11 @@ class TranslationPublicationAssuranceService:
                 glossary_terms=context["glossary_terms"],
                 entity_context=context["entity_context"],
                 model=str(getattr(config, "naturalness_critic_model", None) or getattr(config, "model_name", "")),
+                # Thiếu context đoạn trước thì không sửa được lỗi COHESION/PRONOUN mà critic đã chỉ ra.
+                previous_context=context["previous_context"],
+                address_terms=(
+                    context["address_ledger"].to_payload() if not context["address_ledger"].is_empty else None
+                ),
             )
             rewrite_latency = (time.perf_counter() - started) * 1000
         except NotImplementedError:
@@ -448,6 +499,33 @@ class TranslationPublicationAssuranceService:
             and semantic_recheck.approved
             and naturalness_recheck.passed(pass_threshold)
         )
+        if rewrite_success and cls._pairwise_guard_enabled(engine):
+            # Điểm tuyệt đối của critic nhỏ khá nhiễu; so sánh cặp chặn trường hợp bản viết lại
+            # vượt ngưỡng nhưng thực ra kém tự nhiên hơn bản gốc.
+            pairwise = compare_original_and_rewrite(
+                engine.provider, semantic_node.content, result.translated_text, rewritten,
+                document_type=str(getattr(engine.config, "document_type", "GENERAL") or "GENERAL"),
+                register=str(getattr(engine.config, "register", "") or ""),
+                model=str(getattr(engine.config, "naturalness_critic_model", None) or getattr(engine.config, "model_name", "")),
+            )
+            naturalness_recheck = replace(
+                naturalness_recheck,
+                critic_calls=naturalness_recheck.critic_calls + pairwise.calls,
+                critic_latency_ms=naturalness_recheck.critic_latency_ms + pairwise.latency_ms,
+            )
+            if pairwise.original_preferred:
+                rewrite_success = False
+                naturalness_recheck = replace(
+                    naturalness_recheck,
+                    status="FAIL",
+                    issues=list(naturalness_recheck.issues) + [{
+                        "type": "SENTENCE_FLOW",
+                        "severity": "WARNING",
+                        "source_span": "",
+                        "target_span": "",
+                        "message": "So sánh cặp: bản viết lại kém tự nhiên hơn bản dịch gốc ở cả hai thứ tự.",
+                    }],
+                )
         final_result = cls._attach_naturalness(
             semantic_recheck,
             naturalness_recheck,
@@ -465,6 +543,6 @@ class TranslationPublicationAssuranceService:
             resolved_issue_ids=resolved_issue_ids,
             semantic_result=final_result.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
             latency_ms=latency_ms + rewrite_latency,
-            naturalness_result=cls._naturalness_payload(naturalness_recheck, pass_threshold),
+            naturalness_result=cls._naturalness_payload(naturalness_recheck, pass_threshold, cls.critic_self_review(engine)),
         )
         return final_result

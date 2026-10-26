@@ -9,6 +9,8 @@ from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.json_parser import parse_translation_batch_strict
 from app.services.qa.result_validator import qa_error, validate_qa_result
 from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
+from app.services.translation.address_terms import ADDRESS_TERMS_CRITIC_INSTRUCTION, ADDRESS_TERMS_REWRITE_INSTRUCTION
+from app.services.translation.provider_base import PAIRWISE_NATURALNESS_SYSTEM_PROMPT, unwrap_quoted_output
 
 
 class OllamaProvider(TranslationProvider):
@@ -153,8 +155,7 @@ class OllamaProvider(TranslationProvider):
                     content = re.sub(r'^```[a-zA-Z]*\n?', '', content)
                     content = re.sub(r'\n?```$', '', content).strip()
                 # Clean quotation wrappers if entire text was quoted
-                if (content.startswith('"') and content.endswith('"')) or (content.startswith('“') and content.endswith('”')):
-                    content = content[1:-1].strip()
+                content = unwrap_quoted_output(content, text)
                 return content
             else:
                 raise RuntimeError(f"Ollama error {res.status_code}: {res.text}")
@@ -217,8 +218,7 @@ class OllamaProvider(TranslationProvider):
                 if content.startswith("```") and content.endswith("```"):
                     content = re.sub(r'^```[a-zA-Z]*\n?', '', content)
                     content = re.sub(r'\n?```$', '', content).strip()
-                if (content.startswith('"') and content.endswith('"')) or (content.startswith('“') and content.endswith('”')):
-                    content = content[1:-1].strip()
+                content = unwrap_quoted_output(content, source_text)
                 return content
             else:
                 print(f"[OllamaProvider.revise] Error {res.status_code}: {res.text}")
@@ -402,6 +402,7 @@ class OllamaProvider(TranslationProvider):
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
         style_hints: Optional[List[Dict[str, Any]]] = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         target_model = model or self.default_model
         system_message = (
@@ -411,7 +412,8 @@ class OllamaProvider(TranslationProvider):
             "author in the stated domain when the English source is hidden. Check literal calques, English word "
             "order, collocation, cohesion, pronoun/reference, register, redundancy, nominalization, unnecessary "
             "passive voice and sentence flow. Formal legal, technical and academic style is acceptable when it is "
-            "appropriate and semantically precise. " + CRITIC_STYLE_HINT_INSTRUCTION + " Return strict JSON only "
+            "appropriate and semantically precise. " + CRITIC_STYLE_HINT_INSTRUCTION + " "
+            + ADDRESS_TERMS_CRITIC_INSTRUCTION + " Return strict JSON only "
             "with status PASS or FAIL, score 0..1, the ten required checks, and issues. Each issue must contain "
             "type, severity, target_span and message."
         )
@@ -425,6 +427,7 @@ class OllamaProvider(TranslationProvider):
             "relevant_glossary": glossary_terms or {},
             "relevant_entities": entity_context or {},
             "deterministic_style_hints": style_hints or [],
+            "address_terms": address_terms or {},
             "required_check_names": [
                 "literal_calque", "word_order", "collocation", "cohesion", "pronoun_reference",
                 "register", "redundancy", "nominalization", "passive_voice", "sentence_flow",
@@ -457,6 +460,8 @@ class OllamaProvider(TranslationProvider):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        previous_context: Any = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> str:
         target_model = model or self.default_model
         system_message = (
@@ -465,7 +470,7 @@ class OllamaProvider(TranslationProvider):
             "from ORIGINAL SOURCE. Do not add or omit information, change numbers, negation, modality, causality, "
             "scope, conditions, entities, references or locked terminology. Do not invent a new interpretation. "
             "Only improve Vietnamese syntax, collocation, cohesion, pronouns and unnecessary literal phrasing. "
-            "Respect the document domain, register and sentence style."
+            "Respect the document domain, register and sentence style. " + ADDRESS_TERMS_REWRITE_INSTRUCTION
         )
         user_message = json.dumps({
             "ORIGINAL_SOURCE": source_text,
@@ -476,6 +481,8 @@ class OllamaProvider(TranslationProvider):
             "SENTENCE_STYLE": sentence_style,
             "LOCKED_GLOSSARY": glossary_terms or {},
             "RELEVANT_ENTITIES": entity_context or {},
+            "ADDRESS_TERMS": address_terms or {},
+            "PREVIOUS_BILINGUAL_CONTEXT": previous_context or [],
             "INSTRUCTION": "Edit the Vietnamese, not the meaning.",
         }, ensure_ascii=False)
         payload = {
@@ -496,3 +503,35 @@ class OllamaProvider(TranslationProvider):
             content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
             content = re.sub(r"\n?```$", "", content).strip()
         return content
+
+    def compare_naturalness(
+        self,
+        source_text: str,
+        candidate_a: str,
+        candidate_b: str,
+        document_type: str = "GENERAL",
+        register: str = "",
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        target_model = model or self.default_model
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": PAIRWISE_NATURALNESS_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps({
+                    "source": source_text,
+                    "candidate_a": candidate_a,
+                    "candidate_b": candidate_b,
+                    "document_type": document_type,
+                    "register": register,
+                }, ensure_ascii=False)},
+            ],
+            "format": "json",
+            "stream": False,
+            "keep_alive": "60m",
+            "options": {"temperature": 0.0, "num_ctx": self.effective_context_window(target_model)},
+        }
+        response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
+        if response.status_code != 200:
+            raise RuntimeError(f"Ollama pairwise naturalness HTTP {response.status_code}: {response.text[:200]}")
+        return json.loads(response.json().get("message", {}).get("content", ""))

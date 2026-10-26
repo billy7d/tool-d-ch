@@ -33,6 +33,28 @@ class PromptBuilder:
         "TECHNICAL": "Prioritize technical accuracy and preserve identifiers.",
         "CUSTOM": "Apply valid user preferences after all correctness rules.",
     }
+    # Mô hình nhỏ làm theo ví dụ cụ thể tốt hơn mô tả trừu tượng; mỗi cặp ứng với một luật lint.
+    VIETNAMESE_STYLE_GUIDE = (
+        "VIETNAMESE STYLE GUIDE - CÁCH VIẾT TIẾNG VIỆT TỰ NHIÊN\n"
+        "Nguyên tắc: ưu tiên động từ thay cho danh từ hóa; đưa chủ thể hành động lên làm chủ ngữ thay vì bị động "
+        "'được … bởi'; lược đại từ lặp lại khi chủ ngữ đã rõ; đặt trạng ngữ thời gian, nơi chốn ở đầu câu khi tự "
+        "nhiên hơn; dùng từ thuần Việt khi nghĩa tương đương; không lạm dụng 'của', 'các', 'những', 'sự', 'việc'.\n"
+        "Ví dụ (sát chữ - TRÁNH => tự nhiên - NÊN):\n"
+        "- Đề xuất đã được phê duyệt bởi hội đồng. => Hội đồng đã phê duyệt đề xuất.\n"
+        "- Anh ấy giải thích một cách rõ ràng. => Anh ấy giải thích rõ ràng.\n"
+        "- Công ty đã đưa ra quyết định để thực hiện hành động. => Công ty quyết định hành động.\n"
+        "- Nó là quan trọng để ngủ đủ giấc. => Ngủ đủ giấc là điều quan trọng.\n"
+        "- Các hướng dẫn là dễ dàng để làm theo. => Hướng dẫn này rất dễ làm theo.\n"
+        "- Bản cập nhật đã dẫn đến trong một sự giảm độ trễ. => Bản cập nhật giúp giảm độ trễ.\n"
+        "- Để có thể tiết kiệm thời gian, chúng tôi rời đi sớm. => Để tiết kiệm thời gian, chúng tôi đi sớm.\n"
+        "- Báo cáo, cái mà được công bố vào tháng Sáu, có trên mạng. => Báo cáo công bố hồi tháng Sáu hiện đã có trên mạng.\n"
+        "- Cô ấy nói rằng cô ấy sẽ quay lại khi cơn mưa dừng lại. => Cô bảo sẽ quay lại khi mưa tạnh.\n"
+        "- Kết quả đã khác biệt từ những gì chúng tôi đã mong đợi. => Kết quả khác với dự đoán của chúng tôi.\n"
+        "Các ví dụ chỉ minh họa cách viết; không đưa nội dung của chúng vào bản dịch."
+    )
+    STYLE_GUIDE_MODES = {"NATURAL", "BALANCED", "CUSTOM"}
+    # Khóa style_guide có section riêng, không dump thô vào OPTIONAL STYLE NOTES.
+    STRUCTURED_STYLE_KEYS = {"register", "sentence_style", "address_terms"}
     CONFLICTING_INSTRUCTION_PATTERNS = (
         r"(?i)\btóm tắt\b", r"(?i)\brút gọn\b", r"(?i)\bbỏ (?:qua|bớt)\b",
         r"(?i)\bsummar(?:y|ize)\b", r"(?i)\bom(?:it|ission)\b",
@@ -109,11 +131,14 @@ class PromptBuilder:
                 f"DOCUMENT DOMAIN\n{style_pack.domain}\nSTYLE PACK {STYLE_PACK_VERSION}\n"
                 f"Register: {config.register}\nRules: {style_pack.instructions}\n"
                 f"Forbidden: {style_pack.forbidden}\nSentence restructuring: {config.sentence_style}"
+                + (f"\nVietnamese conventions: {style_pack.conventions}" if style_pack.conventions else "")
             ),
         ]
+        if config.translation_mode in cls.STYLE_GUIDE_MODES:
+            layers.append(cls.VIETNAMESE_STYLE_GUIDE)
         optional_style = {
             key: value for key, value in (config.style_guide or {}).items()
-            if key not in {"register", "sentence_style"}
+            if key not in cls.STRUCTURED_STYLE_KEYS
         }
         if optional_style and include_optional_style_notes:
             layers.append("OPTIONAL STYLE NOTES\n" + json.dumps(optional_style, ensure_ascii=False, indent=2))
@@ -167,6 +192,19 @@ class PromptBuilder:
                 "regex replacement to force a soft term.\n" + "\n".join(
                     cls._glossary_line(item) for item in soft_entries
                 )
+            )
+        if context.address_terms:
+            parts.append(
+                "ADDRESS TERMS (XƯNG HÔ) - MANDATORY CONSISTENCY\n"
+                "Use exactly these Vietnamese address terms for the people present in the current source. "
+                "Characters may change address terms inside dialogue only when the source clearly signals a "
+                "change in relationship.\n" + "\n".join(context.address_terms)
+            )
+        if context.style_rules:
+            parts.append(
+                "PROJECT STYLE RULES - LEARNED FROM EDITOR CORRECTIONS\n"
+                "The editor repeatedly corrected these phrasings in this project. Follow them when the meaning "
+                "fits; never change facts to satisfy a rule.\n" + "\n".join(context.style_rules)
             )
         if context.entity_decisions:
             parts.append("CURRENT RELEVANT ENTITY DECISIONS\n" + "\n".join(

@@ -5,7 +5,7 @@ from typing import Any, Dict
 from app.services.translation.translation_config import TranslationConfig
 
 
-PROMPT_VERSION = "translation-v3.3-naturalness-p0"
+PROMPT_VERSION = "translation-v3.4-naturalness-p1"
 
 
 def canonical_hash(value: Any) -> str:

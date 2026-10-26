@@ -1,7 +1,7 @@
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence, Set
 
 from app.services.translation.glossary_validator import GlossaryValidator
 from app.services.translation.language_validator import validate_target_language
@@ -11,6 +11,17 @@ from app.services.translation.reference_validator import ReferenceValidator
 
 
 URL_PATTERN = re.compile(r"https?://[^\s)\]}]+|www\.[^\s)\]}]+", re.IGNORECASE)
+QUOTE_PATTERN = re.compile(r"[\"“”]")
+OPENING_QUOTE_LOST = re.compile(r"^[^\"“”]+[,.!?…]\s*[\"”]")
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
+WORD_PATTERN = re.compile(r"\w+", re.UNICODE)
+# Câu ngắn trùng nhau là bình thường ("Anh gật đầu."); chỉ coi là chép khi câu đủ dài và gần như trùng hẳn.
+CONTEXT_LEAK_MIN_WORDS = 6
+CONTEXT_LEAK_OVERLAP = 0.8
+
+
+def _word_set(text: str) -> Set[str]:
+    return {word.casefold() for word in WORD_PATTERN.findall(text or "")}
 
 
 def _expand_counter(values: Counter) -> List[str]:
@@ -41,11 +52,52 @@ class TranslationQualityGate:
     def _issue(code: str, severity: str, message: str) -> Dict[str, str]:
         return {"code": code, "severity": severity, "message": message}
 
+    @staticmethod
+    def _content_addition_issues(source: str, target: str, context_translations: Sequence[str]) -> List[Dict[str, str]]:
+        """Bắt các dạng chèn nội dung đã gặp khi chạy qwen2.5:7b thật.
+
+        Model nhỏ hay kéo câu từ đoạn trước vào bản dịch (thêm câu hỏi, chép lại câu đã dịch)
+        và làm rơi dấu ngoặc kép mở đầu lời thoại.
+        """
+        issues: List[Dict[str, str]] = []
+        source_questions = URL_PATTERN.sub(" ", source).count("?")
+        target_questions = URL_PATTERN.sub(" ", target).count("?")
+        if target_questions > source_questions:
+            issues.append(TranslationQualityGate._issue(
+                "CONTENT_ADDITION", "ERROR",
+                f"Bản dịch có {target_questions} câu hỏi trong khi nguồn có {source_questions}; có thể đã chèn nội dung.",
+            ))
+        source_quotes = len(QUOTE_PATTERN.findall(source))
+        target_quotes = len(QUOTE_PATTERN.findall(target))
+        # Nguồn mở đầu bằng lời thoại mà bản dịch lại bắt đầu bằng chữ rồi mới gặp dấu đóng ngoặc:
+        # model đã rơi dấu mở (số dấu vẫn chẵn nếu rơi cả cặp nên kiểm đếm không bắt được).
+        opening_lost = (
+            source[:1] in "\"“" and target[:1] not in "\"“-–—" and OPENING_QUOTE_LOST.match(target)
+        )
+        if opening_lost or (target_quotes % 2 == 1 and source_quotes % 2 == 0):
+            issues.append(TranslationQualityGate._issue(
+                "QUOTE_UNBALANCED", "ERROR", "Dấu ngoặc kép trong bản dịch bị lệch (thiếu mở hoặc đóng lời thoại).",
+            ))
+        previous_sentences = [
+            _word_set(sentence) for text in context_translations for sentence in SENTENCE_SPLIT.split(text or "")
+        ]
+        for sentence in SENTENCE_SPLIT.split(target):
+            words = _word_set(sentence)
+            if len(words) < CONTEXT_LEAK_MIN_WORDS:
+                continue
+            if any(len(words & other) / len(words | other) >= CONTEXT_LEAK_OVERLAP for other in previous_sentences if other):
+                issues.append(TranslationQualityGate._issue(
+                    "CONTEXT_LEAK", "ERROR", f"Câu \"{sentence.strip()[:80]}\" lặp lại bản dịch của đoạn trước.",
+                ))
+                break
+        return issues
+
     def validate(
         self,
         source_text: str,
         translated_text: str,
         locked_glossary: Dict[str, str],
+        context_translations: Optional[Sequence[str]] = None,
     ) -> QualityGateResult:
         source = (source_text or "").strip()
         target = (translated_text or "").strip()
@@ -102,6 +154,8 @@ class TranslationQualityGate:
                     "WARNING",
                     f"Thuật ngữ mềm '{warning.source_term}' ưu tiên '{warning.expected_target}' (cho phép: {allowed}).",
                 ))
+
+            issues.extend(self._content_addition_issues(source, target, context_translations or []))
 
             polarity = PolarityValidator.validate(source, target)
             if polarity.explicit_negation_lost:

@@ -1,3 +1,4 @@
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.models import ChapterModel, NodeModel
 from app.models.canonical import DocumentNode, NodeStatus
+from app.services.translation.address_terms import AddressTermLedger
 from app.services.translation.adaptive_chunker import AdaptiveSemanticChunker, SemanticChunk, TextSegment
 from app.services.translation.context_assembler import ContextAssembler, TranslationContext, estimate_tokens
 from app.services.translation.context_memory import BilingualContextItem, ChapterMemory, ChapterMemoryBuilder, RollingContextService
@@ -21,6 +23,7 @@ from app.services.translation.prompt_profiles import select_few_shots
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.quality_gate import QualityGateResult, TranslationQualityGate
 from app.services.translation.style_memory import StyleMemoryService
+from app.services.translation.style_rules import StyleRuleService
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
 
@@ -114,6 +117,7 @@ class ContextualTranslationEngine:
             and item.get("source_term") and (item.get("preferred_target") or item.get("target_term"))
         }
         self.event_callback = event_callback
+        self.address_ledger = AddressTermLedger.from_style_guide(config.style_guide, config.document_type)
         self.capabilities = provider.get_model_capabilities(config.model_name)
         self.effective_context_window = min(
             self.capabilities.context_window,
@@ -209,6 +213,19 @@ class ContextualTranslationEngine:
             self.db, chapter.id, first.order_index, max_nodes=4, max_tokens=700,
         )
 
+    def address_terms_for(self, source_text: str) -> AddressTermLedger:
+        ledger = getattr(self, "address_ledger", None) or AddressTermLedger.from_style_guide(
+            getattr(self.config, "style_guide", {}), getattr(self.config, "document_type", "GENERAL"),
+        )
+        return ledger.relevant(source_text)
+
+    def project_style_rules(self) -> List[Any]:
+        # Đọc theo request để quy tắc vừa được kích hoạt có hiệu lực ngay; lỗi DB không chặn việc dịch.
+        try:
+            return StyleRuleService.active_rules(self.db, self.project_id)
+        except Exception:
+            return []
+
     def assemble_context(
         self,
         chapter: ChapterModel,
@@ -269,6 +286,8 @@ class ContextualTranslationEngine:
             glossary_entries=getattr(self, "glossary_entries", []),
             style_memory_examples=style_examples,
             continuity_context=continuity_context,
+            address_terms=self.address_terms_for(source_text).prompt_lines(),
+            style_rules=StyleRuleService.prompt_lines(self.project_style_rules()),
             # Đọc ledger theo từng request để quyết định mới có hiệu lực ngay trong cùng engine.
             entity_decisions=EntityLedgerService.relevant_decisions(
                 self.db, self.project_id, source_text, self.locked_glossary,
@@ -438,13 +457,82 @@ class ContextualTranslationEngine:
             return self._empty_failure(node, "TRANSLATION_PROVIDER_ERROR", str(exc), telemetry)
         telemetry.latency_ms = (time.perf_counter() - started) * 1000
         candidate = VietnamesePostProcessor.normalize_safely(candidate)
-        gate = TranslationQualityGate().validate(node.content, candidate, self.glossary_validation_terms)
+        gate = TranslationQualityGate().validate(
+            node.content, candidate, self.glossary_validation_terms, self._context_translations(context),
+        )
         if gate.passed or max_attempts <= 1:
             return EngineNodeResult(node.id, candidate, gate, gate.passed, telemetry=telemetry)
         repaired = self.repair_node(chapter, node, gate.issues, max_attempts=max_attempts - 1)
         repaired.telemetry.provider_calls += telemetry.provider_calls
         repaired.telemetry.latency_ms += telemetry.latency_ms
+        if not repaired.passed and self._has_foreign_script(repaired.quality.issues):
+            return self._recover_foreign_script(node, repaired, context)
         return repaired
+
+    @staticmethod
+    def _context_translations(context: TranslationContext) -> List[str]:
+        return [str(getattr(item, "translation", "") or "") for item in context.previous_context or []]
+
+    @staticmethod
+    def _has_foreign_script(issues: List[Dict[str, Any]]) -> bool:
+        return any(issue.get("code") == "FOREIGN_SCRIPT_CONTAMINATION" for issue in issues)
+
+    FOREIGN_SCRIPT_SYSTEM_PROMPT = (
+        "Bạn là dịch giả Anh–Việt chuyên nghiệp. Chỉ viết tiếng Việt bằng chữ Quốc ngữ (chữ Latin có dấu). "
+        "Tuyệt đối không dùng chữ Hán, tiếng Trung hay bất kỳ ký tự CJK nào. Giữ nguyên tên riêng, số liệu, "
+        "mã, đường dẫn và thuật ngữ bắt buộc. Không thêm, không bớt ý."
+    )
+    CJK_RUN = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]+")
+
+    def _recover_foreign_script(self, node: DocumentNode, failed: EngineNodeResult, context: TranslationContext) -> EngineNodeResult:
+        """qwen2.5 thỉnh thoảng chuyển hẳn sang tiếng Trung với prompt dài; thử lại bằng prompt tiếng Việt ngắn.
+
+        Bước 1 dịch lại cả đoạn với prompt tối giản. Nếu vẫn lọt chữ Hán, bước 2 chỉ dịch các cụm
+        chữ Hán còn sót sang tiếng Việt rồi ghép lại. Kết quả vẫn phải qua quality gate như thường.
+        """
+        telemetry = failed.telemetry
+        previous = self._context_translations(context)
+        glossary_lines = "\n".join(f'- "{source}" -> "{target}"' for source, target in (context.glossary or {}).items())
+        user_prompt = (
+            (f"Thuật ngữ bắt buộc:\n{glossary_lines}\n\n" if glossary_lines else "")
+            + f"Dịch đoạn tiếng Anh sau sang tiếng Việt, chỉ trả về bản dịch:\n\n{node.content}\n\n"
+            + "Nhắc lại: chỉ dùng chữ Quốc ngữ, không dùng chữ Hán."
+        )
+        self._emit("TRANSLATION_FOREIGN_SCRIPT_RECOVERY", {"node_id": node.id, "step": "retranslate"})
+        candidate = failed.translated_text
+        try:
+            telemetry.provider_calls += 1
+            candidate = VietnamesePostProcessor.normalize_safely(self._translate_single_with_contract(
+                node.content, self.FOREIGN_SCRIPT_SYSTEM_PROMPT, context.glossary, 0.0, user_prompt,
+            ))
+        except Exception:
+            pass
+        gate = TranslationQualityGate().validate(node.content, candidate, self.glossary_validation_terms, previous)
+        if not gate.passed and self._has_foreign_script(gate.issues) and self.CJK_RUN.search(candidate):
+            self._emit("TRANSLATION_FOREIGN_SCRIPT_RECOVERY", {"node_id": node.id, "step": "fragments"})
+            pieces = []
+            cursor = 0
+            for match in self.CJK_RUN.finditer(candidate):
+                pieces.append(candidate[cursor:match.start()])
+                try:
+                    telemetry.provider_calls += 1
+                    pieces.append(self._translate_single_with_contract(
+                        match.group(0),
+                        self.FOREIGN_SCRIPT_SYSTEM_PROMPT,
+                        context.glossary,
+                        0.0,
+                        f"Câu tiếng Anh gốc để tham khảo nghĩa:\n{node.content}\n\n"
+                        f"Dịch cụm tiếng Trung sau sang tiếng Việt, chỉ trả về cụm đã dịch:\n{match.group(0)}",
+                    ).strip())
+                except Exception:
+                    pieces.append(match.group(0))
+                cursor = match.end()
+            pieces.append(candidate[cursor:])
+            candidate = VietnamesePostProcessor.normalize_safely(
+                VietnamesePostProcessor.normalize_cjk_punctuation(" ".join(part.strip() for part in pieces if part.strip()))
+            )
+            gate = TranslationQualityGate().validate(node.content, candidate, self.glossary_validation_terms, previous)
+        return EngineNodeResult(node.id, candidate, gate, gate.passed, attempts=failed.attempts + 1, telemetry=telemetry)
 
     def repair_node(
         self,
@@ -482,7 +570,9 @@ class ContextualTranslationEngine:
                 continue
             telemetry.latency_ms = (time.perf_counter() - started) * 1000
             candidate = VietnamesePostProcessor.normalize_safely(candidate)
-            gate = TranslationQualityGate().validate(node.content, candidate, self.glossary_validation_terms)
+            gate = TranslationQualityGate().validate(
+                node.content, candidate, self.glossary_validation_terms, self._context_translations(context),
+            )
             last = EngineNodeResult(node.id, candidate, gate, gate.passed, attempts=attempt + 1, telemetry=telemetry)
             if gate.passed:
                 return last

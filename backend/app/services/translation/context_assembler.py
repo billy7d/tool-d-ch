@@ -118,6 +118,9 @@ class TranslationContext:
     entity_decisions: Dict[str, str] = field(default_factory=dict)
     few_shots: List[dict] = field(default_factory=list)
     style_memory_examples: List[dict] = field(default_factory=list)
+    # Dòng chỉ dẫn xưng hô và quy tắc học từ người biên tập; nhỏ và không bị trim.
+    address_terms: List[str] = field(default_factory=list)
+    style_rules: List[str] = field(default_factory=list)
     continuity_context: Optional[BilingualContextItem] = None
     context_priority: Tuple[str, ...] = NATURAL_BALANCED_CONTEXT_PRIORITY
     token_budget: Optional[ContextTokenBudget] = None
@@ -209,6 +212,8 @@ class ContextAssembler:
         style_memory_examples: Optional[List[dict]] = None,
         continuity_context: Optional[BilingualContextItem] = None,
         glossary_entries: Optional[List[dict]] = None,
+        address_terms: Optional[List[str]] = None,
+        style_rules: Optional[List[str]] = None,
     ) -> TranslationContext:
         source_text = "\n".join(str(getattr(node, "content", "") or "") for node in nodes)
         source_payload = cls._source_payload(nodes, prompt_kind)
@@ -282,7 +287,9 @@ class ContextAssembler:
                 "entities": estimate_tokens(json.dumps(relevant_entities, ensure_ascii=False)),
                 "few_shot": estimate_tokens(json.dumps(selected_shots, ensure_ascii=False)),
                 "style_memory": estimate_tokens(json.dumps(selected_style, ensure_ascii=False)),
-                "contract": estimate_tokens(output_contract) + cls.CONTEXT_LABEL_OVERHEAD,
+                # Xưng hô và quy tắc dự án là chỉ dẫn bắt buộc như contract nên tính vào phần cố định.
+                "contract": estimate_tokens(output_contract) + cls.CONTEXT_LABEL_OVERHEAD
+                + estimate_tokens("\n".join(address_terms or [])) + estimate_tokens("\n".join(style_rules or [])),
             }
 
         def total() -> int:
@@ -395,6 +402,8 @@ class ContextAssembler:
             entity_decisions=relevant_entities,
             few_shots=selected_shots,
             style_memory_examples=selected_style,
+            address_terms=list(address_terms or []),
+            style_rules=list(style_rules or []),
             continuity_context=continuity_context,
             context_priority=NATURAL_BALANCED_CONTEXT_PRIORITY,
             token_budget=budget,

@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.db.models import Base, ChapterModel, NodeModel, ProjectModel
 from app.services.qa.vietnamese_naturalness_critic import VietnameseNaturalnessCritic
+from app.services.qa.vietnamese_style_lint import VietnameseStyleLint
 from app.services.translation.contextual_engine import ContextualTranslationEngine
 from app.services.translation.mock_provider import MockProvider
 from app.services.translation.ollama_provider import OllamaProvider
@@ -79,6 +80,15 @@ def _naturalness(provider: Any, source: str, target: str, domain: str) -> Dict[s
     }
 
 
+def _lint_fields(source: str, target: str, domain: str) -> Dict[str, Any]:
+    issues = VietnameseStyleLint.lint(target, source, domain)
+    return {
+        "lint_warnings": sum(1 for item in issues if item.severity == "WARNING"),
+        "lint_infos": sum(1 for item in issues if item.severity == "INFO"),
+        "word_count": len(target.split()),
+    }
+
+
 def _baseline_row(provider: Any, row: Mapping[str, Any], model_name: str) -> Dict[str, Any]:
     source = str(row.get("source", ""))
     started = time.perf_counter()
@@ -95,6 +105,8 @@ def _baseline_row(provider: Any, row: Mapping[str, Any], model_name: str) -> Dic
         "request_tokens": len(source.split()), "few_shot_count": 0, "style_memory_hits": 0,
         "naturalness": natural["naturalness"], "naturalness_critic_calls": natural["naturalness_critic_calls"],
         "editorial_rewrite_count": 0, "semantic_repairs": 0,
+        "naturalness_status": natural["naturalness_status"],
+        **_lint_fields(source, target, str(row.get("domain", "GENERAL"))),
     }
 
 
@@ -115,6 +127,8 @@ def _candidate_row(engine: ContextualTranslationEngine, chapter: ChapterModel, n
         "naturalness": natural["naturalness"], "naturalness_critic_calls": natural["naturalness_critic_calls"],
         "editorial_rewrite_count": 0, "semantic_repairs": telemetry.retries,
         "deterministic_error": not result.quality.passed,
+        "naturalness_status": natural["naturalness_status"],
+        **_lint_fields(node.content, result.translated_text, str(row.get("domain", "GENERAL"))),
     }
 
 

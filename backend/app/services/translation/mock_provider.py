@@ -182,6 +182,7 @@ class MockProvider(TranslationProvider):
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
         style_hints: Optional[List[Dict[str, Any]]] = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Mock critic có các tín hiệu ổn định để test ranking và editorial flow offline."""
         checks = {key: "PASS" for key in (
@@ -287,6 +288,8 @@ class MockProvider(TranslationProvider):
         glossary_terms: Optional[Dict[str, str]] = None,
         entity_context: Optional[Dict[str, str]] = None,
         model: Optional[str] = None,
+        previous_context: Any = None,
+        address_terms: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Sửa một số fixture đại diện; các candidate khác được giữ nguyên để test fail-closed."""
         if "[[EDITORIAL_REWRITE_FAIL]]" in current_translation:
@@ -300,3 +303,21 @@ class MockProvider(TranslationProvider):
         if "đưa ra quyết định" in target.lower():
             return target.replace("đã đưa ra quyết định để thực hiện hành động ngay lập tức", "quyết định hành động ngay")
         return target
+
+    def compare_naturalness(
+        self,
+        source_text: str,
+        candidate_a: str,
+        candidate_b: str,
+        document_type: str = "GENERAL",
+        register: str = "",
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Mock chọn bản có ít cảnh báo lint hơn để test pairwise guard offline."""
+        from app.services.qa.vietnamese_style_lint import VietnameseStyleLint
+
+        warnings_a = len(VietnameseStyleLint.warnings(candidate_a, source_text, document_type))
+        warnings_b = len(VietnameseStyleLint.warnings(candidate_b, source_text, document_type))
+        if warnings_a == warnings_b:
+            return {"preferred": "TIE", "reason": "mock: cùng số cảnh báo lint"}
+        return {"preferred": "A" if warnings_a < warnings_b else "B", "reason": "mock: ít cảnh báo lint hơn"}

@@ -20,6 +20,7 @@ from app.api.export_router import router as export_router
 from app.api.system_router import router as system_router
 from app.api.events_router import router as events_router
 from app.api.entities_router import router as entities_router
+from app.api.style_router import router as style_router
 
 
 @asynccontextmanager
@@ -60,6 +61,7 @@ app.include_router(export_router)
 app.include_router(system_router)
 app.include_router(events_router)
 app.include_router(entities_router)
+app.include_router(style_router)
 
 # Mount project assets and static files
 if settings.STATIC_DIR.exists():
