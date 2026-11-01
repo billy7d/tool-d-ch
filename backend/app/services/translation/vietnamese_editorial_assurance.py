@@ -20,6 +20,8 @@ from app.services.translation.entity_ledger import EntityLedgerService
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.semantic_assurance import SemanticAssuranceResult, SemanticAssuranceService
 from app.services.translation.style_rules import StyleRuleService
+from app.services.translation.term_matcher import TermMatcher
+from app.services.translation.review_draft import save_review_draft
 from app.services.qa.semantic_critic import semantic_signature
 from app.services.translation.translation_commit import TranslationCommitService
 from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
@@ -92,9 +94,54 @@ class TranslationPublicationAssuranceService:
 
     @staticmethod
     def _project_hints(engine, ledger: AddressTermLedger, source_text: str, translated_text: str) -> List[Dict[str, Any]]:
-        """Hint riêng của project: sai xưng hô với người đọc và cụm người biên tập hay sửa."""
+        """Hint riêng của project: sai xưng hô với người đọc, cụm người biên tập hay sửa, thuật ngữ mềm bị bỏ qua."""
         rules = engine.project_style_rules() if hasattr(engine, "project_style_rules") else []
-        return ledger.check(source_text, translated_text) + StyleRuleService.lint(rules, translated_text)
+        return (
+            ledger.check(source_text, translated_text)
+            + StyleRuleService.lint(rules, translated_text)
+            + TranslationPublicationAssuranceService._soft_term_hints(engine, source_text, translated_text)
+        )
+
+    @classmethod
+    def _hints_for_node(cls, engine, ledger: AddressTermLedger, node, translated_text: str) -> List[Dict[str, Any]]:
+        hints = cls._project_hints(engine, ledger, node.content or "", translated_text)
+        if cls._is_heading(node):
+            # Heading không được rewrite, nên thuật ngữ mềm bị bỏ qua chỉ là gợi ý, không được chặn heading.
+            hints = [hint for hint in hints if hint.get("rule") != "SOFT_TERM_MISSED"]
+        return hints
+
+    @staticmethod
+    def _soft_term_hints(engine, source_text: str, translated_text: str) -> List[Dict[str, Any]]:
+        """Thuật ngữ mềm (gồm preset) chỉ nằm trong prompt nên qwen2.5:7b hay bỏ qua ("build command" ->
+        "lệnh xây dựng"). Biến thành WARNING của lint để bước rewrite sửa đúng chỗ; không bao giờ chặn cứng."""
+        target = (translated_text or "").casefold()
+        soft = [
+            entry for entry in getattr(engine, "glossary_entries", None) or []
+            if str(entry.get("lock_level", "")).upper() == "SOFT" and entry.get("source_term")
+            and TermMatcher.contains(source_text or "", str(entry["source_term"]))
+        ]
+        present = [str(entry["source_term"]).casefold() for entry in soft]
+        hints = []
+        for entry in soft:
+            source_term = str(entry.get("source_term", ""))
+            if any(source_term.casefold() != other and source_term.casefold() in other for other in present):
+                # "build" nằm trong "build command": để thuật ngữ dài hơn quyết định, không báo trùng.
+                continue
+            options = [str(entry.get("preferred_target", ""))] + [str(item) for item in entry.get("allowed_variants") or []]
+            options = [option for option in options if option]
+            if not source_term or not options or not TermMatcher.contains(source_text or "", source_term):
+                continue
+            if any(option.casefold() in target for option in options):
+                continue
+            hints.append({
+                "rule": "SOFT_TERM_MISSED",
+                "type": "COLLOCATION",
+                "severity": "WARNING",
+                "target_span": source_term,
+                "message": f'Thuật ngữ "{source_term}" nên dịch là "{options[0]}".',
+                "suggestion": f'Dùng "{options[0]}"' + (f" (hoặc {', '.join(options[1:])})" if len(options) > 1 else "") + ".",
+            })
+        return hints
 
     @classmethod
     def _review_naturalness(
@@ -113,7 +160,7 @@ class TranslationPublicationAssuranceService:
                 return VietnameseNaturalnessCritic.lint_review(
                     node.content, translated_text,
                     document_type=str(getattr(config, "document_type", "GENERAL") or "GENERAL"),
-                    extra_hints=cls._project_hints(engine, ledger, node.content or "", translated_text),
+                    extra_hints=cls._hints_for_node(engine, ledger, node, translated_text),
                     pass_threshold=pass_threshold, rewrite_threshold=rewrite_threshold,
                 )
             return VietnameseNaturalnessCritic.review(
@@ -131,7 +178,7 @@ class TranslationPublicationAssuranceService:
                     or getattr(config, "model_name", "")
                 ),
                 address_terms=ledger.to_payload() if not ledger.is_empty else None,
-                extra_hints=cls._project_hints(engine, ledger, node.content or "", translated_text),
+                extra_hints=cls._hints_for_node(engine, ledger, node, translated_text),
                 pass_threshold=pass_threshold,
                 rewrite_threshold=rewrite_threshold,
                 lint_fallback=bool((getattr(config, "style_guide", {}) or {}).get("naturalness_lint_fallback", True)),
@@ -323,6 +370,9 @@ class TranslationPublicationAssuranceService:
                     status="OPEN",
                 ))
         db_node.status = "NEEDS_REVIEW"
+        save_review_draft(
+            db_node, result.translated_text, [issue.get("type") for issue in naturalness.issues], "NATURALNESS",
+        )
         engine.db.commit()
 
     @classmethod

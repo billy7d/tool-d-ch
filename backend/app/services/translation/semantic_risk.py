@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 
-SEMANTIC_POLICY_VERSION = "semantic-policy-v2"
+SEMANTIC_POLICY_VERSION = "semantic-policy-v4"
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,8 @@ class SemanticRiskScorer:
         if str(document_type).lower() in cls.HIGH_RISK_TYPES or str(node_type).lower() in cls.HIGH_RISK_TYPES:
             value += 0.25
             reasons.append("SENSITIVE_DOMAIN_OR_NODE")
+        # Không ép critic cho heading: chạy thật, critic 7B chấm sai heading 1–3 từ ("Nhà" cho "The House"
+        # bị coi là thiếu ý). Lỗi heading chép bản dịch heading khác được bắt deterministic ở engine.
         if previous_repairs:
             value += min(0.30, 0.18 * previous_repairs)
             reasons.append("PREVIOUS_REPAIR")

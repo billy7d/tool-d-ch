@@ -11,6 +11,12 @@ PAIRWISE_NATURALNESS_SYSTEM_PROMPT = (
 )
 
 
+def output_token_cap(*texts: str, factor: float = 2.0, floor: int = 256, ceiling: int = 2048) -> int:
+    """Trần số token output theo độ dài đầu vào (~4 ký tự/token, tiếng Việt tốn token hơn tiếng Anh)."""
+    source_tokens = sum(len(text or "") for text in texts) / 4
+    return int(min(ceiling, max(floor, source_tokens * factor + 64)))
+
+
 _QUOTE_CHARS = "\"“”"
 
 

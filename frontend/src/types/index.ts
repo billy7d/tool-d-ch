@@ -71,6 +71,15 @@ export interface NodeMetadata {
   footnote_number?: string;
   confidence: number;
   structure_issues?: string[];
+  draft_translation?: DraftTranslation;
+}
+
+/** Bản nháp bị gate/critic chặn; không phải bản dịch chính thức. */
+export interface DraftTranslation {
+  text: string;
+  reasons: string[];
+  stage: 'QUALITY_GATE' | 'SEMANTIC' | 'NATURALNESS';
+  saved_at: string;
 }
 
 export interface DocumentNode {

@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, Callable, List
 from app.db.engine import get_project_db, sync_project_progress
 from app.db.models import ProjectModel, ChapterModel, NodeModel
 from app.db.repository import ProjectRepository
+from app.services.translation.review_draft import clear_review_draft, save_review_draft
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.ollama_provider import OllamaProvider
 from app.services.translation.mock_provider import MockProvider
@@ -355,6 +356,10 @@ class TranslationWorker:
                             db_node = db.query(NodeModel).filter(NodeModel.id == result.node_id).first()
                             if db_node:
                                 db_node.status = "NEEDS_REVIEW"
+                                save_review_draft(
+                                    db_node, result.translated_text,
+                                    [issue.get("code") for issue in result.quality.issues], "QUALITY_GATE",
+                                )
                                 db.commit()
                             self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
                                 "project_id": project_id,

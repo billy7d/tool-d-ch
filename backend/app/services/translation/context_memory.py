@@ -103,7 +103,7 @@ class ChapterMemoryBuilder:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def stratified_sample(nodes: List[Any], max_chars: int = 5500) -> str:
+    def stratified_sample(nodes: List[Any], max_chars: int = 3000) -> str:
         usable = [node for node in nodes if str(getattr(node, "content", "") or "").strip()]
         if not usable:
             return ""

@@ -94,6 +94,10 @@ class NodeMetadata(BaseModel):
     footnote_number: Optional[str] = None
     code_language: Optional[str] = None
     confidence: float = 1.0  # Structure / OCR confidence
+    # Bản nháp bị gate/critic chặn (không phải bản dịch chính thức) để người duyệt không phải dịch lại từ đầu.
+    draft_translation: Optional[Dict[str, Any]] = None
+    # Kết luận naturalness đã duyệt, QA dùng lại khi chữ chưa đổi.
+    naturalness: Optional[Dict[str, Any]] = None
     structure_issues: List[str] = Field(default_factory=list)
     extra: Dict[str, Any] = Field(default_factory=dict)
 

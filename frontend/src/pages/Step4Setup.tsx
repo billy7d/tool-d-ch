@@ -17,7 +17,8 @@ import {
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { Project, GlossaryItem, TranslationMode, DocumentType, HardwareInfo, TranslationPreviewResponse, AddressTerms } from '../types';
-import { CriticMode, StyleConsistencyPanel } from '../components/StyleConsistencyPanel';
+import { StyleConsistencyPanel } from '../components/StyleConsistencyPanel';
+import { buildStyleGuide as buildProjectStyleGuide, CriticMode, defaultGlossaryPresets } from '../lib/styleGuide';
 
 interface Step4SetupProps {
   project: Project;
@@ -38,7 +39,12 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
   const [sentenceStyle, setSentenceStyle] = useState<string>((project.style_guide?.sentence_style as string) || 'MODERATE');
   const [addressTerms, setAddressTerms] = useState<AddressTerms>((project.style_guide?.address_terms as AddressTerms) || {});
   const [criticModel, setCriticModel] = useState<string>((project.style_guide?.naturalness_critic_model as string) || '');
+  const [semanticCriticModel, setSemanticCriticModel] = useState<string>((project.style_guide?.semantic_critic_model as string) || '');
   const [criticMode, setCriticMode] = useState<CriticMode>((project.style_guide?.naturalness_critic_mode as CriticMode) || 'AUTO');
+  // Chưa cấu hình thì mặc định bật preset của chính lĩnh vực tài liệu (giống backend).
+  const [glossaryPresets, setGlossaryPresets] = useState<string[]>(
+    defaultGlossaryPresets(project.style_guide?.glossary_presets as string[] | undefined, project.document_type),
+  );
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TranslationPreviewResponse | null>(null);
 
@@ -63,26 +69,16 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
     fetchGlossary();
   }, [project.id]);
 
-  const buildStyleGuide = () => {
-    // Bỏ các dòng xưng hô nhập dở để backend không nhận mục rỗng.
-    const pairs = (addressTerms.pairs || []).filter((p) => p.speaker && p.listener && p.self && p.other);
-    const characters = Object.fromEntries(
-      Object.entries(addressTerms.characters || {}).filter(([name, term]) => name.trim() && term.trim()),
-    );
-    const guide: Record<string, any> = {
-      ...(project.style_guide || {}),
+  const buildStyleGuide = () =>
+    buildProjectStyleGuide(project.style_guide, {
       register,
-      sentence_style: sentenceStyle,
-      address_terms: { ...addressTerms, pairs, characters },
-      naturalness_critic_mode: criticMode,
-    };
-    if (criticModel) {
-      guide.naturalness_critic_model = criticModel;
-    } else {
-      delete guide.naturalness_critic_model;
-    }
-    return guide;
-  };
+      sentenceStyle,
+      addressTerms,
+      criticMode,
+      glossaryPresets,
+      criticModel,
+      semanticCriticModel,
+    });
 
   const handleSaveSetup = async () => {
     try {
@@ -427,6 +423,10 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
         onCriticModelChange={setCriticModel}
         criticMode={criticMode}
         onCriticModeChange={setCriticMode}
+        glossaryPresets={glossaryPresets}
+        onGlossaryPresetsChange={setGlossaryPresets}
+        semanticCriticModel={semanticCriticModel}
+        onSemanticCriticModelChange={setSemanticCriticModel}
         installedModels={hardware?.installed_models || []}
       />
 

@@ -15,6 +15,7 @@ from app.services.translation.context_assembler import ContextAssembler, Transla
 from app.services.translation.context_memory import BilingualContextItem, ChapterMemory, ChapterMemoryBuilder, RollingContextService
 from app.services.translation.document_profiler import DocumentProfiler, DocumentTranslationProfile
 from app.services.translation.entity_ledger import EntityLedgerService
+from app.services.translation.glossary_presets import preset_entries, presets_for
 from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.json_parser import validate_translation_batch
 from app.services.translation.node_policy import normalize_node_type
@@ -116,6 +117,14 @@ class ContextualTranslationEngine:
             if str(item.get("lock_level", "HARD")).upper() == "SOFT"
             and item.get("source_term") and (item.get("preferred_target") or item.get("target_term"))
         }
+        # Preset được thêm SAU khi đã tính hard map và validation terms: preset chỉ là gợi ý mềm,
+        # không được làm mất hard term truyền riêng (legacy) hay chặn bản dịch.
+        presets = preset_entries(
+            presets_for(getattr(config, "style_guide", {}), config.document_type),
+            existing_sources=list(self.locked_glossary) + [str(item.get("source_term", "")) for item in self.glossary_entries],
+        )
+        self.glossary_entries.extend(presets)
+        self.soft_glossary.update({item["source_term"]: item["preferred_target"] for item in presets})
         self.event_callback = event_callback
         self.address_ledger = AddressTermLedger.from_style_guide(config.style_guide, config.document_type)
         self.capabilities = provider.get_model_capabilities(config.model_name)
@@ -500,16 +509,54 @@ class ContextualTranslationEngine:
             # Model chép "Chương 1:" từ tiêu đề chương trong context vào heading con ("Legal Terms").
             stripped = self.HEADING_LABEL_PREFIX.sub("", text, count=1)
             text = stripped or text
+        if node_type.startswith("heading") and "\n" not in (node.content or "").strip() and "\n" in text:
+            # Heading một dòng chỉ lấy dòng đầu: chạy thật thấy batch nhét luôn đoạn kế tiếp vào heading
+            # ("Nhà\n\n“Anh về rồi,” …").
+            text = next((line.strip() for line in text.splitlines() if line.strip()), text)
         fixed = self.address_terms_for(node.content or "").fix_dialogue(node.content or "", text) if text else None
         if fixed:
             text = fixed
-        return text, self._validate_candidate(node.content, text, previous)
+        gate = self._validate_candidate(node.content, text, previous)
+        if node_type.startswith("heading") and text:
+            duplicate = self._duplicated_heading(node, text)
+            if duplicate:
+                gate = QualityGateResult(False, True, max(0.0, round(gate.score - 0.25, 2)), list(gate.issues) + [{
+                    "code": "HEADING_DUPLICATE", "severity": "ERROR",
+                    "message": f'Heading "{node.content}" bị dịch trùng với heading khác "{duplicate}".',
+                }])
+        return text, gate
+
+    def _duplicated_heading(self, node: DocumentNode, text: str) -> Optional[str]:
+        """Heading dịch ra trùng/nằm trong bản dịch của heading khác có nguồn khác.
+
+        Chạy thật: "The House" thành "Trở Lại", lấy từ tiêu đề chương "Chương 1: Trở Lại" ("The Return").
+        """
+        try:
+            others = self.db.query(NodeModel).filter(
+                NodeModel.project_id == self.project_id,
+                NodeModel.id != node.id,
+                NodeModel.node_type.like("heading%"),
+                NodeModel.translated_content.isnot(None),
+            ).all()
+        except Exception:
+            return None
+        candidate = text.strip().casefold()
+        source = (node.content or "").strip().casefold()
+        for other in others:
+            other_source = (other.content or "").strip().casefold()
+            other_target = (other.translated_content or "").strip().casefold()
+            if not other_target or source == other_source or source in other_source or other_source in source:
+                continue
+            if candidate == other_target or (len(candidate) >= 3 and candidate in other_target):
+                return other.translated_content
+        return None
 
     FOREIGN_SCRIPT_SYSTEM_PROMPT = (
         "Bạn là dịch giả Anh–Việt chuyên nghiệp. Chỉ viết tiếng Việt bằng chữ Quốc ngữ (chữ Latin có dấu). "
         "Tuyệt đối không dùng chữ Hán, tiếng Trung hay bất kỳ ký tự CJK nào. Giữ nguyên tên riêng, số liệu, "
         "mã, đường dẫn và thuật ngữ bắt buộc. Không thêm, không bớt ý."
     )
+    SOURCE_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"“])")
     CJK_RUN = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]+")
 
     def _recover_foreign_script(self, node: DocumentNode, failed: EngineNodeResult, context: TranslationContext) -> EngineNodeResult:
@@ -536,6 +583,27 @@ class ContextualTranslationEngine:
         except Exception:
             pass
         candidate, gate = self._finalize_candidate(node, candidate, previous)
+        sentences = [part.strip() for part in self.SOURCE_SENTENCE_SPLIT.split(node.content or "") if part.strip()]
+        if not gate.passed and len(sentences) > 1:
+            # Chạy thật: một đoạn văn học lọt chữ Hán ở cả 5 vòng, kể cả với prompt ngắn; lần thử lại còn
+            # bị cụt mất "2019" (NUMBER_MISMATCH). Câu ngắn ít trôi sang tiếng Trung và ít bị cụt hơn,
+            # nên dịch từng câu với cùng prompt tối giản rồi ghép lại, bất kể lần thử lại hỏng vì lý do gì.
+            self._emit("TRANSLATION_FOREIGN_SCRIPT_RECOVERY", {"node_id": node.id, "step": "sentences"})
+            parts = []
+            for sentence in sentences:
+                try:
+                    telemetry.provider_calls += 1
+                    parts.append(VietnamesePostProcessor.normalize_safely(self._translate_single_with_contract(
+                        sentence, self.FOREIGN_SCRIPT_SYSTEM_PROMPT, context.glossary, 0.0,
+                        user_prompt.replace(node.content, sentence),
+                    )))
+                except Exception:
+                    parts = []
+                    break
+            if parts:
+                sentence_candidate, sentence_gate = self._finalize_candidate(node, " ".join(parts), previous)
+                if sentence_gate.passed or len(sentence_gate.issues) < len(gate.issues):
+                    candidate, gate = sentence_candidate, sentence_gate
         if not gate.passed and self._has_foreign_script(gate.issues) and self.CJK_RUN.search(candidate):
             self._emit("TRANSLATION_FOREIGN_SCRIPT_RECOVERY", {"node_id": node.id, "step": "fragments"})
             pieces = []

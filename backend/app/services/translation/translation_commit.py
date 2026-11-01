@@ -9,6 +9,7 @@ from app.db.repository import TranslationRepository
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.translation_memory import TranslationMemoryService
 from app.services.translation.entity_ledger import EntityLedgerService
+from app.services.translation.review_draft import clear_review_draft
 
 
 class TranslationCommitService:
@@ -106,6 +107,8 @@ class TranslationCommitService:
                 review.critic_latency_ms = semantic_result.get("critic_latency_ms", 0.0)
                 review.critic_calls = semantic_result.get("critic_calls", 0)
                 db.flush()
+            committed_node = db.query(NodeModel).filter(NodeModel.id == node.id).first()
+            clear_review_draft(committed_node)
             if naturalness_result:
                 # Lưu kết luận đã duyệt để QA không phải gọi lại critic cho đoạn chưa bị sửa.
                 db_node = db.query(NodeModel).filter(NodeModel.id == node.id).first()

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import requests
 from requests.adapters import HTTPAdapter
@@ -10,13 +11,31 @@ from app.services.translation.json_parser import parse_translation_batch_strict
 from app.services.qa.result_validator import qa_error, validate_qa_result
 from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
 from app.services.translation.address_terms import ADDRESS_TERMS_CRITIC_INSTRUCTION, ADDRESS_TERMS_REWRITE_INSTRUCTION
-from app.services.translation.provider_base import PAIRWISE_NATURALNESS_SYSTEM_PROMPT, unwrap_quoted_output
+from app.services.translation.provider_base import (
+    PAIRWISE_NATURALNESS_SYSTEM_PROMPT,
+    output_token_cap,
+    unwrap_quoted_output,
+)
+
+
+logger = logging.getLogger(__name__)
+# Mẫu 5500 ký tự + schema JSON làm qwen2.5:7b chạy chạm timeout 60s ở mọi chương khi test thật.
+CHAPTER_MEMORY_SAMPLE_CHARS = 3000
 
 
 class OllamaProvider(TranslationProvider):
     # Tiếng Việt lặp hư từ ("của", "các", "được"...) rất dày; phạt nặng sẽ đẩy model sang từ
     # đồng nghĩa gượng hoặc Hán-Việt. Vòng lặp thoái hóa đã có deduplicate_repetitions xử lý.
     VIETNAMESE_REPEAT_PENALTY = 1.05
+
+    def _options(self, model: str, temperature: float, num_predict: int, **extra: Any) -> Dict[str, Any]:
+        """Mọi lệnh gọi dùng cùng num_ctx (khác num_ctx thì Ollama phải nạp lại model) và có trần output.
+
+        Không có num_predict, model sa vào vòng lặp (chuỗi chữ Hán khi test thật) sẽ sinh tới hết timeout.
+        """
+        options = {"temperature": temperature, "num_ctx": self.effective_context_window(model), "num_predict": int(num_predict)}
+        options.update(extra)
+        return options
 
     def __init__(self, base_url: str = settings.DEFAULT_OLLAMA_URL, default_model: str = settings.DEFAULT_MODEL):
         self.base_url = base_url.rstrip("/")
@@ -70,12 +89,12 @@ class OllamaProvider(TranslationProvider):
             "format": "json",
             "stream": False,
             "keep_alive": "60m",  # Keep model locked in VRAM for instant subsequent responses
-            "options": {
-                "temperature": temperature,
-                "top_p": 0.9,
-                "repeat_penalty": self.VIETNAMESE_REPEAT_PENALTY,
-                "num_ctx": self.effective_context_window(target_model),
-            }
+            "options": self._options(
+                target_model, temperature,
+                # JSON bao ngoài thêm khoảng 40 token mỗi block.
+                output_token_cap(*(b.get("text", "") for b in blocks)) + 40 * len(blocks),
+                top_p=0.9, repeat_penalty=self.VIETNAMESE_REPEAT_PENALTY,
+            ),
         }
 
         try:
@@ -137,12 +156,10 @@ class OllamaProvider(TranslationProvider):
             ],
             "stream": False,
             "keep_alive": "60m",
-            "options": {
-                "temperature": temperature,
-                "top_p": 0.85,
-                "repeat_penalty": self.VIETNAMESE_REPEAT_PENALTY,
-                "num_ctx": self.effective_context_window(target_model),
-            }
+            "options": self._options(
+                target_model, temperature, output_token_cap(text),
+                top_p=0.85, repeat_penalty=self.VIETNAMESE_REPEAT_PENALTY,
+            ),
         }
 
         try:
@@ -203,12 +220,10 @@ class OllamaProvider(TranslationProvider):
             ],
             "stream": False,
             "keep_alive": "60m",
-            "options": {
-                "temperature": 0.15,
-                "top_p": 0.85,
-                "repeat_penalty": self.VIETNAMESE_REPEAT_PENALTY,
-                "num_ctx": self.effective_context_window(target_model),
-            }
+            "options": self._options(
+                target_model, 0.15, output_token_cap(source_text, current_translation),
+                top_p=0.85, repeat_penalty=self.VIETNAMESE_REPEAT_PENALTY,
+            ),
         }
 
         try:
@@ -239,10 +254,10 @@ class OllamaProvider(TranslationProvider):
             ],
             "stream": False,
             "keep_alive": "60m",
-            "options": {"temperature": 0.2}
+            "options": self._options(target_model, 0.2, 300),
         }
         try:
-            res = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=40.0)
+            res = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
             if res.status_code == 200:
                 return res.json().get("message", {}).get("content", "").strip()
         except Exception:
@@ -270,7 +285,7 @@ class OllamaProvider(TranslationProvider):
         )
         user_message = (
             f"CHAPTER TITLE: {chapter_title}\nDOCUMENT TYPE: {document_type}\n"
-            f"SOURCE SAMPLE:\n{text_sample[:5500]}"
+            f"SOURCE SAMPLE:\n{text_sample[:CHAPTER_MEMORY_SAMPLE_CHARS]}"
         )
         payload = {
             "model": target_model,
@@ -281,16 +296,18 @@ class OllamaProvider(TranslationProvider):
             "format": "json",
             "stream": False,
             "keep_alive": "60m",
-            "options": {"temperature": 0.1},
+            "options": self._options(target_model, 0.1, 700),
         }
         try:
-            response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
+            response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=120.0)
             if response.status_code == 200:
                 content = response.json().get("message", {}).get("content", "")
                 parsed = json.loads(content)
                 return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            pass
+            logger.warning("Chapter memory HTTP %s: %s", response.status_code, response.text[:200])
+        except Exception as exc:
+            # Trước đây lỗi bị nuốt im lặng: mỗi chương mất trắng 60s mà không ai biết.
+            logger.warning("Chapter memory failed for %r: %s", chapter_title, exc)
         return {}
 
     def extract_glossary(
@@ -314,7 +331,7 @@ class OllamaProvider(TranslationProvider):
             "format": "json",
             "stream": False,
             "keep_alive": "60m",
-            "options": {"temperature": 0.2}
+            "options": self._options(target_model, 0.2, 900),
         }
         try:
             res = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
@@ -353,7 +370,7 @@ class OllamaProvider(TranslationProvider):
             "format": "json",
             "stream": False,
             "keep_alive": "60m",
-            "options": {"temperature": 0.1}
+            "options": self._options(target_model, 0.1, 700),
         }
         try:
             res = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
@@ -383,7 +400,7 @@ class OllamaProvider(TranslationProvider):
             "model": target_model,
             "messages": [{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
             "format": "json", "stream": False, "keep_alive": "60m",
-            "options": {"temperature": 0.0, "num_ctx": self.effective_context_window(target_model)},
+            "options": self._options(target_model, 0.0, 700),
         }
         response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
         if response.status_code != 200:
@@ -442,7 +459,7 @@ class OllamaProvider(TranslationProvider):
             "format": "json",
             "stream": False,
             "keep_alive": "60m",
-            "options": {"temperature": 0.0, "num_ctx": self.effective_context_window(target_model)},
+            "options": self._options(target_model, 0.0, 900),
         }
         response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
         if response.status_code != 200:
@@ -493,7 +510,7 @@ class OllamaProvider(TranslationProvider):
             ],
             "stream": False,
             "keep_alive": "60m",
-            "options": {"temperature": 0.1, "num_ctx": self.effective_context_window(target_model)},
+            "options": self._options(target_model, 0.1, output_token_cap(source_text, current_translation)),
         }
         response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
         if response.status_code != 200:
@@ -529,7 +546,7 @@ class OllamaProvider(TranslationProvider):
             "format": "json",
             "stream": False,
             "keep_alive": "60m",
-            "options": {"temperature": 0.0, "num_ctx": self.effective_context_window(target_model)},
+            "options": self._options(target_model, 0.0, 200),
         }
         response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
         if response.status_code != 200:

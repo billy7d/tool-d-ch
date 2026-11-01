@@ -12,6 +12,7 @@ from app.services.translation.contextual_engine import ContextualTranslationEngi
 from app.services.translation.glossary_service import GlossaryService
 from app.services.translation.style_memory import StyleMemoryService
 from app.services.translation.style_rules import StyleRuleService
+from app.services.translation.review_draft import clear_review_draft
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.worker import translation_worker
 
@@ -47,6 +48,11 @@ def update_node(project_id: str, node_id: str, payload: NodeUpdate):
         if payload.content is not None or payload.translated_content is not None:
             SemanticAssuranceService.invalidate_for_nodes(db, project_id, [node_id])
 
+        if payload.translated_content is not None:
+            existing = db.query(NodeModel).filter(NodeModel.id == node_id).first()
+            if existing and (existing.node_metadata or {}).get("draft_translation"):
+                clear_review_draft(existing)
+                update_dict["node_metadata"] = existing.node_metadata
         updated = repo.update_node(node_id, **update_dict)
         if not updated:
             raise HTTPException(status_code=404, detail="Không tìm thấy phần tử nội dung (node).")

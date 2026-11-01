@@ -9,7 +9,11 @@ from app.services.translation.json_parser import parse_translation_batch_strict
 from app.services.qa.result_validator import qa_error, validate_qa_result
 from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
 from app.services.translation.address_terms import ADDRESS_TERMS_CRITIC_INSTRUCTION, ADDRESS_TERMS_REWRITE_INSTRUCTION
-from app.services.translation.provider_base import PAIRWISE_NATURALNESS_SYSTEM_PROMPT, unwrap_quoted_output
+from app.services.translation.provider_base import (
+    PAIRWISE_NATURALNESS_SYSTEM_PROMPT,
+    output_token_cap,
+    unwrap_quoted_output,
+)
 
 
 class OpenAILocalProvider(TranslationProvider):
@@ -71,6 +75,7 @@ class OpenAILocalProvider(TranslationProvider):
             ],
             "response_format": {"type": "json_object"},
             "temperature": temperature,
+            "max_tokens": output_token_cap(*(b.get("text", "") for b in blocks)) + 40 * len(blocks),
         }
 
         try:
@@ -125,6 +130,7 @@ class OpenAILocalProvider(TranslationProvider):
                 {"role": "user", "content": usr_msg}
             ],
             "temperature": temperature,
+            "max_tokens": output_token_cap(text),
         }
 
         try:
@@ -153,6 +159,7 @@ class OpenAILocalProvider(TranslationProvider):
             "model": target_model,
             "messages": [{"role": "system", "content": sys_msg}, {"role": "user", "content": usr_msg}],
             "temperature": 0.2,
+            "max_tokens": output_token_cap(source_text, current_translation),
         }
         try:
             res = self.session.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=payload, timeout=60.0)
@@ -201,11 +208,13 @@ class OpenAILocalProvider(TranslationProvider):
                     "role": "user",
                     "content": (
                         f"CHAPTER TITLE: {chapter_title}\nDOCUMENT TYPE: {document_type}\n"
-                        f"SOURCE SAMPLE:\n{text_sample[:5500]}"
+                        # Cùng giới hạn với Ollama: mẫu dài làm model nhỏ chạm timeout ở mọi chương.
+                        f"SOURCE SAMPLE:\n{text_sample[:3000]}"
                     ),
                 },
             ],
             "temperature": 0.1,
+            "max_tokens": 700,
             "response_format": {"type": "json_object"},
         }
         try:
@@ -242,6 +251,7 @@ class OpenAILocalProvider(TranslationProvider):
                 {"role": "user", "content": user_message},
             ],
             "temperature": 0.1,
+            "max_tokens": 700,
             "response_format": {"type": "json_object"},
         }
         try:
@@ -275,6 +285,7 @@ class OpenAILocalProvider(TranslationProvider):
                 }, ensure_ascii=False)},
             ],
             "temperature": 0.0,
+            "max_tokens": 700,
             "response_format": {"type": "json_object"},
         }
         response = self.session.post(
@@ -327,6 +338,7 @@ class OpenAILocalProvider(TranslationProvider):
                 {"role": "user", "content": user_message},
             ],
             "temperature": 0.0,
+            "max_tokens": 900,
             "response_format": {"type": "json_object"},
         }
         response = self.session.post(
@@ -378,6 +390,7 @@ class OpenAILocalProvider(TranslationProvider):
                 {"role": "user", "content": user_message},
             ],
             "temperature": 0.1,
+            "max_tokens": output_token_cap(source_text, current_translation),
         }
         response = self.session.post(
             f"{self.base_url}/chat/completions", headers=self._headers(), json=payload, timeout=60.0,
@@ -413,6 +426,7 @@ class OpenAILocalProvider(TranslationProvider):
                 }, ensure_ascii=False)},
             ],
             "temperature": 0.0,
+            "max_tokens": 200,
             "response_format": {"type": "json_object"},
         }
         response = self.session.post(

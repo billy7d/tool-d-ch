@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Users, Wand2, Plus, Trash2, AlertTriangle } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { AddressPair, AddressTerms, DocumentType, StyleRule } from '../types';
+import type { CriticMode } from '../lib/styleGuide';
 
 // Khớp DEFAULT_READER_TERMS ở backend/app/services/translation/address_terms.py.
 const DEFAULT_READER: Partial<Record<DocumentType, string>> = {
@@ -23,9 +24,22 @@ interface StyleConsistencyPanelProps {
   criticMode: CriticMode;
   onCriticModeChange: (value: CriticMode) => void;
   installedModels: string[];
+  glossaryPresets: string[];
+  onGlossaryPresetsChange: (value: string[]) => void;
+  semanticCriticModel: string;
+  onSemanticCriticModelChange: (value: string) => void;
 }
 
-export type CriticMode = 'AUTO' | 'LINT_ONLY' | 'ALWAYS';
+export type { CriticMode } from '../lib/styleGuide';
+
+// Khớp PRESETS trong backend/app/services/translation/glossary_presets.py.
+export const GLOSSARY_PRESET_DOMAINS: { value: string; label: string }[] = [
+  { value: 'LEGAL', label: 'Pháp lý' },
+  { value: 'TECHNICAL', label: 'Kỹ thuật' },
+  { value: 'FINANCE', label: 'Tài chính' },
+  { value: 'BUSINESS', label: 'Kinh doanh' },
+  { value: 'ACADEMIC', label: 'Học thuật' },
+];
 
 const inputClass =
   'w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-sky-500';
@@ -41,6 +55,10 @@ export const StyleConsistencyPanel: React.FC<StyleConsistencyPanelProps> = ({
   criticMode,
   onCriticModeChange,
   installedModels,
+  glossaryPresets,
+  onGlossaryPresetsChange,
+  semanticCriticModel,
+  onSemanticCriticModelChange,
 }) => {
   const [rules, setRules] = useState<StyleRule[]>([]);
 
@@ -172,6 +190,25 @@ export const StyleConsistencyPanel: React.FC<StyleConsistencyPanelProps> = ({
         </div>
 
         <div>
+          <label className="block text-[11px] text-slate-300 mb-1">Thuật ngữ mẫu theo lĩnh vực (gợi ý mềm)</label>
+          <div className="flex flex-wrap gap-1.5">
+            {GLOSSARY_PRESET_DOMAINS.map(({ value, label }) => {
+              const active = glossaryPresets.includes(value);
+              return (
+                <button
+                  key={value}
+                  onClick={() => onGlossaryPresetsChange(active ? glossaryPresets.filter((d) => d !== value) : [...glossaryPresets, value])}
+                  className={`px-2 py-1 rounded-md text-[11px] border ${active ? 'bg-sky-500/20 border-sky-500/40 text-sky-200' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[10px] text-slate-500 mt-1">Ví dụ "licensee" → "bên được cấp phép". Thuật ngữ bạn tự thêm luôn được ưu tiên.</p>
+        </div>
+
+        <div>
           <label className="block text-[11px] text-slate-300 mb-1">Cách kiểm độ tự nhiên</label>
           <select value={criticMode} onChange={(e) => onCriticModeChange(e.target.value as CriticMode)} className={inputClass}>
             <option value="AUTO">Tự động (lint; critic AI chỉ ở mức Xuất bản)</option>
@@ -193,6 +230,17 @@ export const StyleConsistencyPanel: React.FC<StyleConsistencyPanelProps> = ({
               <AlertTriangle className="w-3 h-3" /> Critic đang dùng chính model dịch; điểm có thể bị thiên vị.
             </span>
           )}
+        </div>
+
+        <div>
+          <label className="block text-[11px] text-slate-300 mb-1">Model critic ngữ nghĩa</label>
+          <select value={semanticCriticModel} onChange={(e) => onSemanticCriticModelChange(e.target.value)} className={inputClass + ' font-mono'}>
+            <option value="">Giống model dịch ({selectedModel})</option>
+            {installedModels.filter((m) => m !== selectedModel).map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <p className="text-[10px] text-slate-500 mt-1">Chỉ chạy với câu rủi ro (điều kiện, phủ định, lượng từ…). Model lớn hơn bắt lỗi sai nghĩa tốt hơn nhưng chậm hơn.</p>
         </div>
 
         <div className="space-y-2">

@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Dict, List, Optional, Pattern
 
 
-STYLE_LINT_VERSION = "vietnamese-style-lint-v2"
+STYLE_LINT_VERSION = "vietnamese-style-lint-v3"
 LONG_SENTENCE_SYLLABLES = 60
 PASSIVE_DENSITY_LIMIT = 3
 
@@ -177,6 +177,42 @@ _PATTERN_RULES = (
         _compile(r"\blà\s+(?:rất\s+)?(?:đáng kể|quan trọng|cần thiết|hiệu quả)(?=\s*[,.;!?]|\s*$)"),
         "'là + tính từ' cuối vế là dịch sát 'is significant/important'.",
         "Bỏ 'là': 'mối tương quan đáng kể', 'việc này rất quan trọng'.",
+    ),
+    _PatternRule(
+        "DUA_RA_MOT_QUYET_DINH", "NOMINALIZATION", "WARNING",
+        _compile(r"\bđưa ra\s+một\s+quyết định\b"),
+        "'đưa ra một quyết định' dịch sát 'make a decision'.",
+        "Dùng động từ 'quyết định'.",
+    ),
+    _PatternRule(
+        "LIGHT_VERB_ARTICLE", "NOMINALIZATION", "WARNING",
+        _compile(r"\b(?:tạo ra|cung cấp|thực hiện)\s+một\s+(?!(?:số|vài|chút|lần|cách|phần|loạt|nửa)\b)[^\s.,;:!?]+"),
+        "Động từ nhẹ + 'một' + danh từ dịch sát mạo từ 'a/an' ('tạo ra một lợi nhuận').",
+        "Bỏ 'một' hoặc dùng động từ cụ thể: 'mang lại lợi nhuận', 'gửi yêu cầu'.",
+    ),
+    _PatternRule(
+        "CONNECTOR_SU_NOUN", "NOMINALIZATION", "WARNING",
+        _compile(rf"\b(?:mặc dù|dù|sau|trước|khi)\s+(?:một\s+)?sự\s+(?!{_LEXICAL_SU})[^\s.,;:!?]+"),
+        "'sau/khi/mặc dù + (một) sự …' là danh hóa kiểu tiếng Anh.",
+        "Dùng mệnh đề có động từ: 'sau khi xem xét kỹ', 'dù đã giảm'.",
+    ),
+    _PatternRule(
+        "CALQUE_PHRASE_2", "LITERAL_CALQUE", "WARNING",
+        _compile(r"\b(?:ở tại|đồng ý để|không phải để|có thể dường như|bằng cách sử dụng)\b"),
+        "Cụm dịch sát ('remain at', 'agree to', 'have to', 'may seem', 'by using').",
+        "Dùng: 'ở mức', 'đồng ý/nhất trí', 'không cần', 'có vẻ', 'bằng'.",
+    ),
+    _PatternRule(
+        "LA_KHONG_ADJECTIVE", "LITERAL_CALQUE", "WARNING",
+        _compile(r"\blà\s+không\s+(?:hợp lệ|đúng|chính xác|cần thiết|rõ ràng|khả dụng|an toàn)\b"),
+        "'là không + tính từ' dịch sát 'is invalid/is not …'.",
+        "Bỏ 'là': 'đầu vào không hợp lệ'.",
+    ),
+    _PatternRule(
+        "REPEATED_SUBJECT_RANG", "REDUNDANCY", "WARNING",
+        _compile(r"\b(cô ấy|anh ấy|chị ấy|họ|chúng tôi|tôi)\b[^.!?]{1,30}?\brằng\s+\1\b"),
+        "Lặp lại chủ ngữ sau 'rằng' ('Cô ấy nói rằng cô ấy …').",
+        "Lược chủ ngữ lặp: 'Cô bảo sẽ quay lại'.",
     ),
     _PatternRule(
         "AI_CUNG_KHONG", "LITERAL_CALQUE", "WARNING",

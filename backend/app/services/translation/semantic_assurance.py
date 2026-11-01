@@ -13,6 +13,7 @@ from app.services.translation.semantic_risk import SEMANTIC_POLICY_VERSION, Sema
 from app.services.translation.entity_ledger import EntityLedgerService
 from app.services.translation.term_matcher import TermMatcher
 from app.services.translation.quality_gate import TranslationQualityGate
+from app.services.translation.review_draft import save_review_draft
 
 
 SEMANTIC_REPAIR_PROMPT_VERSION = "semantic-repair-v1"
@@ -252,7 +253,10 @@ class SemanticAssuranceService:
                 critic_latency_ms=result.critic_latency_ms, critic_calls=result.critic_calls,
             ))
         for error in result.errors:
-            issue_type = error.get("type", "SEMANTIC_QA_ERROR")
+            # Lỗi từ gate/repair dùng khóa "code", lỗi critic dùng "type".
+            issue_type = error.get("type") or error.get("code") or "SEMANTIC_QA_ERROR"
+            if issue_type == "SEMANTIC_REPAIR_POLICY":
+                continue  # chỉ dẫn nội bộ cho prompt repair, không phải lỗi của bản dịch
             open_issue = db.query(QAIssueModel).filter(
                 QAIssueModel.project_id == project_id,
                 QAIssueModel.node_id == node.id,
@@ -268,6 +272,11 @@ class SemanticAssuranceService:
                     translation_snippet=(result.translated_text or "")[:180], status="OPEN",
                 ))
         node.status = "NEEDS_REVIEW"
+        save_review_draft(
+            node, result.translated_text,
+            [error.get("type") or error.get("code") for error in result.errors if (error.get("type") or error.get("code")) != "SEMANTIC_REPAIR_POLICY"],
+            "SEMANTIC",
+        )
         db.commit()
 
     @classmethod

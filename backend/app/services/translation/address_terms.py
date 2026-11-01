@@ -212,6 +212,21 @@ class AddressTermLedger:
                 "code": "ADDRESS_TERM_MISMATCH", "severity": "ERROR",
                 "message": f"Xưng hô trong lời thoại bị đảo vai ({' '.join(actual)}). {expectation}",
             }]
+        # Số đại từ lệch (model thêm/bớt) thì vẫn kiểm được chỗ chắc chắn nhất: lời thoại nguồn mở đầu
+        # bằng I/you thì từ đầu tiên của lời thoại dịch, nếu là từ xưng hô của cặp, phải đúng vai.
+        # Chạy thật: "I will stay" -> "Em sẽ ở lại" lọt qua vì bản dịch có 4 đại từ so với 3.
+        first_source = _QUOTED.search(source_text or "")
+        first_target = _QUOTED.search(translated_text or "")
+        if first_source and first_target:
+            source_words = _VI_WORD.findall(first_source.group(0))
+            target_words = _VI_WORD.findall(first_target.group(0).casefold())
+            if source_words and target_words and _ENGLISH_PERSON.fullmatch(source_words[0]):
+                wanted = pair.speaker_self if _FIRST_PERSON.fullmatch(source_words[0]) else pair.listener_term
+                if target_words[0] in pair_terms and target_words[0] != wanted.casefold():
+                    return [{
+                        "code": "ADDRESS_TERM_MISMATCH", "severity": "ERROR",
+                        "message": f"Lời thoại mở đầu bằng \"{target_words[0]}\" nhưng phải là \"{wanted}\". {expectation}",
+                    }]
         return []
 
     def fix_dialogue(self, source_text: str, translated_text: str) -> Optional[str]:

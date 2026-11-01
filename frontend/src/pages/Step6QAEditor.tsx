@@ -16,6 +16,7 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
+import { draftStageLabel } from '../lib/styleGuide';
 import { CanonicalDocument, DocumentNode, Project, QAIssue, Chapter, SemanticSummary, SemanticReview, EntityDecision } from '../types';
 
 interface Step6QAEditorProps {
@@ -609,6 +610,25 @@ export const Step6QAEditor: React.FC<Step6QAEditorProps> = ({ project, onNext, o
 
             {selectedNode ? (
               <div className="space-y-4">
+                {selectedNode.metadata?.draft_translation && !selectedNode.translated_content && (
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-[11px] font-semibold text-amber-300">
+                        Bản nháp bị chặn ({draftStageLabel(selectedNode.metadata.draft_translation.stage)})
+                      </span>
+                      <button
+                        onClick={() => setEditedText(selectedNode.metadata.draft_translation?.text || '')}
+                        className="shrink-0 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-[11px] font-medium border border-amber-500/30"
+                      >
+                        Dùng bản nháp để sửa
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-200 leading-relaxed font-serif">{selectedNode.metadata.draft_translation.text}</p>
+                    <p className="text-[10px] text-amber-200/80">
+                      Lý do: {selectedNode.metadata.draft_translation.reasons.join(', ') || 'không rõ'}. Bản nháp chưa được lưu làm bản dịch; hãy sửa rồi duyệt.
+                    </p>
+                  </div>
+                )}
                 <textarea
                   value={editedText}
                   onChange={(e) => setEditedText(e.target.value)}
