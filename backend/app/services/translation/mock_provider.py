@@ -1,3 +1,4 @@
+import re
 from typing import List, Dict, Any, Optional
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.term_matcher import TermMatcher
@@ -19,6 +20,30 @@ class MockProvider(TranslationProvider):
         "opportunity cost": "chi phí cơ hội",
         "compound interest": "lãi kép",
     }
+
+    # Từ chức năng tiếng Anh được đổi sang tiếng Việt để output mock không vướng gate ENGLISH_RESIDUE,
+    # nhưng vẫn giữ phủ định, số liệu và thuật ngữ cho các test pipeline.
+    FUNCTION_WORDS = {
+        "the": "", "and": "và", "of": "của", "with": "với", "that": "rằng", "this": "này",
+        "these": "những", "those": "những", "is": "là", "are": "là", "was": "đã là", "were": "đã là",
+        "been": "đã", "have": "có", "has": "có", "had": "đã có", "would": "sẽ", "could": "có thể",
+        "should": "nên", "nobody": "không ai", "somebody": "ai đó", "everybody": "mọi người",
+        "anybody": "bất kỳ ai", "nothing": "không gì", "something": "điều gì đó", "everything": "mọi thứ",
+        "anything": "bất cứ thứ gì", "never": "không bao giờ", "always": "luôn", "said": "nói",
+        "because": "vì", "which": "mà", "what": "gì", "when": "khi", "where": "nơi", "there": "đó",
+        "their": "của họ", "they": "họ", "she": "cô ấy", "his": "của anh ấy", "her": "cô ấy",
+        "him": "anh ấy", "from": "từ", "into": "vào", "about": "về", "than": "hơn", "then": "rồi",
+        "just": "chỉ", "very": "rất", "only": "chỉ", "also": "cũng", "not": "không",
+        "however": "tuy nhiên", "therefore": "vì vậy", "although": "mặc dù",
+    }
+    _FUNCTION_WORD = re.compile(r"(?<![\w.`/\\-])[A-Za-z]+(?![\w.`/\\-])")
+
+    @classmethod
+    def _vietnamize_function_words(cls, text: str) -> str:
+        def swap(match):
+            word = match.group(0)
+            return cls.FUNCTION_WORDS.get(word.lower(), word) if word.lower() in cls.FUNCTION_WORDS else word
+        return re.sub(r"\s{2,}", " ", cls._FUNCTION_WORD.sub(swap, text)).strip()
 
     def health_check(self) -> bool:
         return True
@@ -47,7 +72,7 @@ class MockProvider(TranslationProvider):
                     
             translations.append({
                 "node_id": node_id,
-                "text": vi_text
+                "text": self._vietnamize_function_words(vi_text)
             })
         return translations
 
@@ -68,7 +93,7 @@ class MockProvider(TranslationProvider):
             for en_term, vi_term in glossary_terms.items():
                 if TermMatcher.contains(text, en_term):
                     vi_text = TermMatcher.pattern(en_term).sub(vi_term, vi_text)
-        return vi_text
+        return self._vietnamize_function_words(vi_text)
 
 
     def revise(

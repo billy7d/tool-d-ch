@@ -20,8 +20,12 @@ interface StyleConsistencyPanelProps {
   selectedModel: string;
   criticModel: string;
   onCriticModelChange: (value: string) => void;
+  criticMode: CriticMode;
+  onCriticModeChange: (value: CriticMode) => void;
   installedModels: string[];
 }
+
+export type CriticMode = 'AUTO' | 'LINT_ONLY' | 'ALWAYS';
 
 const inputClass =
   'w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-sky-500';
@@ -34,6 +38,8 @@ export const StyleConsistencyPanel: React.FC<StyleConsistencyPanelProps> = ({
   selectedModel,
   criticModel,
   onCriticModelChange,
+  criticMode,
+  onCriticModeChange,
   installedModels,
 }) => {
   const [rules, setRules] = useState<StyleRule[]>([]);
@@ -163,6 +169,15 @@ export const StyleConsistencyPanel: React.FC<StyleConsistencyPanelProps> = ({
           <p className="text-[11px] text-slate-400 mt-1">
             Critic chấm độ tự nhiên nên dùng model khác model dịch để tránh tự chấm bài của chính mình.
           </p>
+        </div>
+
+        <div>
+          <label className="block text-[11px] text-slate-300 mb-1">Cách kiểm độ tự nhiên</label>
+          <select value={criticMode} onChange={(e) => onCriticModeChange(e.target.value as CriticMode)} className={inputClass}>
+            <option value="AUTO">Tự động (lint; critic AI chỉ ở mức Xuất bản)</option>
+            <option value="LINT_ONLY">Chỉ lint (nhanh nhất)</option>
+            <option value="ALWAYS">Luôn dùng critic AI (chậm hơn ~30s/đoạn với model 7B)</option>
+          </select>
         </div>
 
         <div>

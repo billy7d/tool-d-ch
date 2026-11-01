@@ -109,6 +109,13 @@ class TranslationPublicationAssuranceService:
         try:
             context = cls._naturalness_context(engine, chapter, node)
             ledger = context["address_ledger"]
+            if not cls._use_llm_critic(engine, node):
+                return VietnameseNaturalnessCritic.lint_review(
+                    node.content, translated_text,
+                    document_type=str(getattr(config, "document_type", "GENERAL") or "GENERAL"),
+                    extra_hints=cls._project_hints(engine, ledger, node.content or "", translated_text),
+                    pass_threshold=pass_threshold, rewrite_threshold=rewrite_threshold,
+                )
             return VietnameseNaturalnessCritic.review(
                 provider=engine.provider,
                 source_text=node.content,
@@ -155,8 +162,27 @@ class TranslationPublicationAssuranceService:
         return pass_threshold, rewrite_threshold
 
     @staticmethod
-    def _rewrite_permitted(engine, result: VietnameseNaturalnessResult) -> bool:
-        """Không rewrite chỉ vì văn phong formal hợp lệ ở domain nhạy cảm."""
+    def _is_heading(node) -> bool:
+        node_type = str(getattr(node, "node_type", None) or getattr(getattr(node, "type", None), "value", "") or "").lower()
+        return node_type.startswith("heading") or node_type in {"title", "subtitle", "caption"}
+
+    @classmethod
+    def _use_llm_critic(cls, engine, node) -> bool:
+        """AUTO: chỉ gọi critic LLM ở tier PUBLISHING; tier mặc định dùng lint (nhanh hơn ~30s/đoạn với 7B)."""
+        if cls._is_heading(node):
+            # Heading quá ngắn để critic đánh giá văn phong; rewrite từng biến "Nhà" thành "Nhà Bob".
+            return False
+        config = engine.config
+        mode = str((getattr(config, "style_guide", {}) or {}).get("naturalness_critic_mode", "AUTO") or "AUTO").upper()
+        if mode in {"ALWAYS", "LINT_ONLY"}:
+            return mode == "ALWAYS"
+        return str(getattr(config, "quality_tier", "") or "").upper() != "HIGH_QUALITY"
+
+    @classmethod
+    def _rewrite_permitted(cls, engine, result: VietnameseNaturalnessResult, node=None) -> bool:
+        """Không rewrite heading, cũng không rewrite chỉ vì văn phong formal hợp lệ ở domain nhạy cảm."""
+        if node is not None and cls._is_heading(node):
+            return False
         config = engine.config
         mode = str(getattr(config, "translation_mode", "NATURAL") or "NATURAL").upper()
         document_type = str(getattr(config, "document_type", "GENERAL") or "GENERAL").upper()
@@ -204,6 +230,11 @@ class TranslationPublicationAssuranceService:
         )
 
     @staticmethod
+    def critic_model(engine) -> str:
+        config = engine.config
+        return str(getattr(config, "naturalness_critic_model", None) or getattr(config, "model_name", "") or "")
+
+    @staticmethod
     def critic_self_review(engine) -> bool:
         """Critic trùng model dịch dễ thiên vị bản của chính nó; ghi lại để audit và UI cảnh báo."""
         config = engine.config
@@ -221,9 +252,11 @@ class TranslationPublicationAssuranceService:
         result: VietnameseNaturalnessResult,
         pass_threshold: float,
         critic_self_review: bool = False,
+        critic_model: str = "",
     ) -> Dict[str, Any]:
         return {
             "critic_self_review": critic_self_review,
+            "critic_model": critic_model,
             "status": result.status,
             "score": result.score,
             "pass_threshold": pass_threshold,
@@ -368,11 +401,11 @@ class TranslationPublicationAssuranceService:
                 resolved_issue_ids=resolved_issue_ids,
                 semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
                 latency_ms=latency_ms,
-                naturalness_result=cls._naturalness_payload(naturalness, pass_threshold, cls.critic_self_review(engine)),
+                naturalness_result=cls._naturalness_payload(naturalness, pass_threshold, cls.critic_self_review(engine), cls.critic_model(engine)),
             )
             return approved
 
-        if not naturalness.rewrite_allowed(rewrite_threshold, pass_threshold) or not cls._rewrite_permitted(engine, naturalness):
+        if not naturalness.rewrite_allowed(rewrite_threshold, pass_threshold) or not cls._rewrite_permitted(engine, naturalness, node):
             rejected = cls._attach_naturalness(result, naturalness)
             cls._persist_naturalness_rejected(engine, node, rejected, naturalness)
             return rejected
@@ -455,11 +488,15 @@ class TranslationPublicationAssuranceService:
 
         # Dù deterministic recheck fail, vẫn chạy đủ hai critic theo contract P0;
         # kết quả cuối cùng chỉ được APPROVED khi cả ba tầng đều đạt.
-        rewritten_quality = TranslationQualityGate().validate(
-            semantic_node.content,
-            rewritten,
-            getattr(engine, "glossary_validation_terms", glossary),
-        )
+        if hasattr(engine, "_validate_candidate"):
+            # Cùng gate với lúc dịch (gồm xưng hô lời thoại) để bản viết lại không đảo vai trở lại.
+            rewritten_quality = engine._validate_candidate(semantic_node.content, rewritten)
+        else:
+            rewritten_quality = TranslationQualityGate().validate(
+                semantic_node.content,
+                rewritten,
+                getattr(engine, "glossary_validation_terms", glossary),
+            )
         rewritten_entity_issues = EntityLedgerService.validate_locked(
             engine.db, engine.project_id, semantic_node.content, rewritten, glossary,
         )
@@ -543,6 +580,6 @@ class TranslationPublicationAssuranceService:
             resolved_issue_ids=resolved_issue_ids,
             semantic_result=final_result.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
             latency_ms=latency_ms + rewrite_latency,
-            naturalness_result=cls._naturalness_payload(naturalness_recheck, pass_threshold, cls.critic_self_review(engine)),
+            naturalness_result=cls._naturalness_payload(naturalness_recheck, pass_threshold, cls.critic_self_review(engine), cls.critic_model(engine)),
         )
         return final_result

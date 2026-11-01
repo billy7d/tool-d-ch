@@ -206,15 +206,34 @@ class VietnamesePostProcessor:
 
         return cleaned
 
-    @staticmethod
-    def normalize_safely(text: str) -> str:
-        """Chỉ chuẩn hóa khoảng trắng, không xóa ký tự hoặc câu của candidate."""
+    # Ngoặc kép thẳng trong code (`print("x")`, key="v") phải giữ nguyên.
+    # Dấu phẩy/hai chấm trước ngoặc là bình thường trong lời thoại nên không coi là code.
+    _CODE_QUOTE_CONTEXT = re.compile(r"`|[=(\[{]\s*\"|\"\s*[)\]}]")
+
+    @classmethod
+    def normalize_dialogue_quotes(cls, text: str) -> str:
+        """Đổi cặp ngoặc thẳng của lời thoại thành “…” và bỏ khoảng trắng thừa bên trong.
+
+        Model hay trả `"Anh về rồi, " Alice nói`; chỉ xử lý khi số ngoặc chẵn và không có dấu hiệu code.
+        """
+        if not text or text.count('"') == 0 or text.count('"') % 2 or cls._CODE_QUOTE_CONTEXT.search(text):
+            return text
+        pieces = text.split('"')
+        result = pieces[0]
+        for index, piece in enumerate(pieces[1:]):
+            result += ("“" if index % 2 == 0 else "”") + piece
+        result = re.sub(r"“\s+", "“", result)
+        return re.sub(r"\s+”", "”", result)
+
+    @classmethod
+    def normalize_safely(cls, text: str) -> str:
+        """Chỉ chuẩn hóa khoảng trắng và kiểu ngoặc lời thoại, không xóa ký tự hoặc câu của candidate."""
         if not text:
             return ""
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
         normalized = re.sub(r"[ \t]+", " ", normalized)
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-        return normalized.strip()
+        return cls.normalize_dialogue_quotes(normalized.strip())
 
     @classmethod
     def enforce_locked_glossary(

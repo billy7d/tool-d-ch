@@ -27,6 +27,31 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 GlobalSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=global_engine)
 
 
+# Pipeline ghi tiến độ vào DB riêng của project, nhưng danh sách dự án, Dashboard và việc
+# chọn bước khi mở lại dự án đọc DB toàn cục. Không ghi xuyên thì UI luôn thấy IMPORTED.
+PROJECT_PROGRESS_FIELDS = ("current_stage", "structure_confirmed", "structure_version")
+
+
+def sync_project_progress(project_id: str, **fields) -> None:
+    from app.db.models import ProjectModel
+
+    values = {key: value for key, value in fields.items() if key in PROJECT_PROGRESS_FIELDS and value is not None}
+    if not values:
+        return
+    db = GlobalSessionLocal()
+    try:
+        project = db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+        if project:
+            for key, value in values.items():
+                setattr(project, key, value)
+            db.commit()
+    except Exception:
+        # Đồng bộ hiển thị không được làm hỏng thao tác chính đã lưu ở DB project.
+        db.rollback()
+    finally:
+        db.close()
+
+
 def init_global_db():
     Base.metadata.create_all(bind=global_engine)
     _apply_additive_project_migrations(global_engine)

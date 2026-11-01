@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_, desc
+from app.db.engine import global_engine, sync_project_progress
 from app.db.models import (
     ProjectModel,
     SourceDocumentModel,
@@ -81,6 +82,8 @@ class ProjectRepository:
         project.updated_at = datetime.utcnow()
         self.db.commit()
         self.db.refresh(project)
+        if self.db.get_bind() is not global_engine:
+            sync_project_progress(project_id, **kwargs)
         return project
 
     def delete_project(self, project_id: str) -> bool:

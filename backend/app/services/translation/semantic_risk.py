@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 
-SEMANTIC_POLICY_VERSION = "semantic-policy-v1"
+SEMANTIC_POLICY_VERSION = "semantic-policy-v2"
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,8 @@ class SemanticRiskScorer:
         "condition": r"\b(if|unless|only if|provided that|except when)\b",
         "modality": r"\b(may|might|must|shall|should|could|would|likely|unlikely)\b",
         "causality": r"\b(because|because of|therefore|thus|consequently|as a result)\b",
-        "scope": r"\b(not only|at least|at most|only|all|none|each|every)\b",
+        # either/any/both...: chạy thật thấy "either party" bị dịch thành "cả hai bên" mà critic không được gọi.
+        "scope": r"\b(not only|at least|at most|only|all|none|each|every|either|neither|any|both|nothing|nobody|no one)\b",
         "contrast": r"\b(although|however|despite|whereas|rather than|instead of)\b",
         "comparison": r"\b(more than|less than|higher than|lower than|compared with|approximately)\b",
     }

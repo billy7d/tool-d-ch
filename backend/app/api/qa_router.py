@@ -19,7 +19,7 @@ from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import build_translation_signature_from_config
 from app.services.translation.semantic_assurance import SemanticAssuranceService
 from app.services.translation.vietnamese_editorial_assurance import TranslationPublicationAssuranceService
-from app.services.qa.vietnamese_naturalness_critic import naturalness_result_to_qa_issues
+from app.services.qa.vietnamese_naturalness_critic import naturalness_cache_key, naturalness_result_to_qa_issues
 from app.services.qa.global_consistency import GlobalConsistencyScanner
 from app.services.translation.entity_ledger import EntityLedgerService
 
@@ -188,7 +188,12 @@ def run_global_consistency(project_id: str):
 
 
 @router.post("/run")
-def run_qa_checks(project_id: str, enable_ai_qa: bool = False, enable_naturalness: bool = True):
+def run_qa_checks(
+    project_id: str,
+    enable_ai_qa: bool = False,
+    enable_naturalness: bool = True,
+    refresh_naturalness: bool = False,
+):
     db = get_project_db(project_id)
     qa_repo = QARepository(db)
 
@@ -217,6 +222,7 @@ def run_qa_checks(project_id: str, enable_ai_qa: bool = False, enable_naturalnes
         naturalness_errors = 0
         naturalness_critic_calls = 0
         naturalness_latency_ms = 0.0
+        naturalness_cached = 0
 
         for n in nodes:
             # 1. Deterministic QA
@@ -252,6 +258,16 @@ def run_qa_checks(project_id: str, enable_ai_qa: bool = False, enable_naturalnes
 
             # 3. Naturalness critic là QA production riêng, không thay thế semantic QA.
             if naturalness_engine:
+                cached = (n.node_metadata or {}).get("naturalness") or {}
+                cache_key = naturalness_cache_key(
+                    n.content, n.translated_content,
+                    TranslationPublicationAssuranceService.critic_model(naturalness_engine),
+                )
+                if not refresh_naturalness and cached.get("status") == "PASS" and cached.get("cache_key") == cache_key:
+                    # Đoạn đã qua naturalness khi dịch và chưa bị sửa: không gọi lại model (~20s/đoạn với 7B).
+                    naturalness_cached += 1
+                    naturalness_passed += 1
+                    continue
                 chapter = db.query(ChapterModel).filter(ChapterModel.id == n.chapter_id).first()
                 if chapter:
                     naturalness = TranslationPublicationAssuranceService._review_naturalness(
@@ -286,6 +302,7 @@ def run_qa_checks(project_id: str, enable_ai_qa: bool = False, enable_naturalnes
             "message": f"Kiểm tra QA hoàn tất. Phát hiện {created_issues_count} cảnh báo.",
             "total_issues": created_issues_count,
             "naturalness_reviewed": naturalness_reviewed,
+            "naturalness_cached": naturalness_cached,
             "naturalness_passed": naturalness_passed,
             "naturalness_failed": naturalness_failed,
             "naturalness_errors": naturalness_errors,

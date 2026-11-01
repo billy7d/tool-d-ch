@@ -30,8 +30,18 @@ def test_qa_run_exposes_naturalness_by_default(monkeypatch, tmp_path):
 
     result = qa_router.run_qa_checks(project_id)
 
+    # Mặc định (tier HIGH_QUALITY) naturalness do lint quyết định, không gọi critic LLM.
     assert result["naturalness_reviewed"] == 1
     assert result["naturalness_failed"] == 1
+    assert result["naturalness_critic_calls"] == 0
+    issue_types = {row.issue_type for row in db.query(QAIssueModel).all()}
+    assert "VIETNAMESE_NOMINALIZATION" in issue_types
+
+    # Chế độ ALWAYS vẫn dùng critic LLM như trước.
+    project = db.query(ProjectModel).filter_by(id=project_id).one()
+    project.style_guide = {"naturalness_critic_mode": "ALWAYS"}
+    db.commit()
+    result = qa_router.run_qa_checks(project_id, refresh_naturalness=True)
     assert result["naturalness_critic_calls"] == 1
     issue_types = {row.issue_type for row in db.query(QAIssueModel).all()}
     assert "VIETNAMESE_COLLOCATION" in issue_types

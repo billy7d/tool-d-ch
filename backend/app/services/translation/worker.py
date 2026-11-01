@@ -4,7 +4,7 @@ import threading
 import json
 import os
 from typing import Dict, Any, Optional, Callable, List
-from app.db.engine import get_project_db
+from app.db.engine import get_project_db, sync_project_progress
 from app.db.models import ProjectModel, ChapterModel, NodeModel
 from app.db.repository import ProjectRepository
 from app.services.translation.provider_base import TranslationProvider
@@ -271,6 +271,7 @@ class TranslationWorker:
             )
             project.current_stage = "TRANSLATING"
             db.commit()
+            sync_project_progress(project_id, current_stage="TRANSLATING")
             chapters = db.query(ChapterModel).filter(
                 ChapterModel.project_id == project_id
             ).order_by(ChapterModel.order_index).all()
@@ -419,6 +420,9 @@ class TranslationWorker:
             self.telemetry.setdefault(project_id, {})["execution_status"] = (
                 "IDLE" if stop_event.is_set() else "STOPPED"
             )
+            if project:
+                # Worker gán stage trực tiếp trên model nên phải tự ghi xuyên sang DB toàn cục.
+                sync_project_progress(project_id, current_stage=project.current_stage)
             db.close()
             self.running_tasks.pop(project_id, None)
             self.pause_tasks.pop(project_id, None)

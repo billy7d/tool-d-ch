@@ -20,6 +20,42 @@ CONTEXT_LEAK_MIN_WORDS = 6
 CONTEXT_LEAK_OVERLAP = 0.8
 
 
+# Token phải giữ nguyên từng ký tự: đường dẫn ổ đĩa/Unix, lời gọi hàm có dấu chấm, code inline.
+# Chạy thật thấy qwen2.5:7b làm rơi "C:" khỏi "C:\workspace\app" mà không gate nào bắt.
+TECHNICAL_TOKEN_PATTERN = re.compile(
+    r"`[^`\n]+`"
+    r"|[A-Za-z]:\\[^\s,;\"'“”()]+"
+    r"|(?<![\w.])/(?:[\w.-]+/)+[\w.-]*"
+    r"|\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\(\)"
+)
+
+
+# Từ tiếng Anh viết thường không trùng âm tiết tiếng Việt nào: còn trong bản dịch là chưa dịch hết.
+# Chạy thật thấy qwen2.5:7b để lại "nobody chạm vào piano". Tránh các từ trùng âm tiết Việt
+# ("to", "do", "in", "me", "an"...), từ kỹ thuật hay giữ nguyên ("build", "client") và chữ viết hoa.
+ENGLISH_RESIDUE_WORDS = {
+    "the", "and", "of", "with", "that", "this", "these", "those", "is", "are", "was", "were", "been",
+    "have", "has", "had", "would", "could", "should", "nobody", "somebody", "everybody", "anybody",
+    "nothing", "something", "everything", "anything", "never", "always", "said", "because", "which",
+    "what", "when", "where", "there", "their", "they", "she", "his", "her", "him", "from", "into",
+    "about", "than", "then", "just", "very", "only", "also", "not", "however", "therefore", "although",
+}
+ENGLISH_WORD = re.compile(r"(?<![\w.`/\\-])[a-z]+(?![\w.`/\\-])")
+EITHER_PATTERN = re.compile(r"\beither\b", re.IGNORECASE)
+BOTH_PATTERN = re.compile(r"\bboth\b", re.IGNORECASE)
+CA_HAI_PATTERN = re.compile(r"\bcả hai\b", re.IGNORECASE)
+UNTRANSLATED_LABEL = re.compile(r"\b(?:Chapter|Section|Figure|Table|Appendix|Part)\s+\d+(?:\.\d+)*\b")
+
+
+def _english_residue(text: str) -> List[str]:
+    prose = URL_PATTERN.sub(" ", TECHNICAL_TOKEN_PATTERN.sub(" ", text or ""))
+    return sorted({word for word in ENGLISH_WORD.findall(prose) if word in ENGLISH_RESIDUE_WORDS})
+
+
+def _technical_tokens(text: str) -> List[str]:
+    return [token.rstrip(".,;:") for token in TECHNICAL_TOKEN_PATTERN.findall(text or "")]
+
+
 def _word_set(text: str) -> Set[str]:
     return {word.casefold() for word in WORD_PATTERN.findall(text or "")}
 
@@ -156,6 +192,35 @@ class TranslationQualityGate:
                 ))
 
             issues.extend(self._content_addition_issues(source, target, context_translations or []))
+
+            if EITHER_PATTERN.search(source) and not BOTH_PATTERN.search(source) and CA_HAI_PATTERN.search(target):
+                issues.append(self._issue(
+                    "QUANTIFIER_SHIFT", "ERROR",
+                    "Nguồn nói 'either' (bất kỳ/một trong hai) nhưng bản dịch thành 'cả hai'.",
+                ))
+
+            residue = _english_residue(target)
+            if residue:
+                issues.append(self._issue(
+                    "ENGLISH_RESIDUE", "ERROR",
+                    f"Còn từ tiếng Anh chưa dịch trong văn xuôi: {', '.join(residue[:5])}",
+                ))
+            untranslated_labels = [
+                match.group(0) for match in UNTRANSLATED_LABEL.finditer(target)
+                if not UNTRANSLATED_LABEL.search(source) or match.group(0) in source
+            ]
+            if untranslated_labels:
+                issues.append(self._issue(
+                    "UNTRANSLATED_LABEL", "ERROR",
+                    f"Nhãn tham chiếu chưa dịch: {', '.join(untranslated_labels[:3])} (vd 'Chapter 1' -> 'Chương 1').",
+                ))
+
+            missing_tokens = [token for token in _technical_tokens(source) if token not in target]
+            if missing_tokens:
+                issues.append(self._issue(
+                    "TECHNICAL_TOKEN_MISMATCH", "ERROR",
+                    f"Thiếu hoặc bị sửa token kỹ thuật phải giữ nguyên: {', '.join(missing_tokens[:5])}",
+                ))
 
             polarity = PolarityValidator.validate(source, target)
             if polarity.explicit_negation_lost:

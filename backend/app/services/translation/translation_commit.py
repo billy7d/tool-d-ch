@@ -3,8 +3,8 @@ from typing import Any, Dict, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
-from app.db.models import QAIssueModel, SemanticReviewModel
-from app.services.qa.vietnamese_naturalness_critic import NATURALNESS_CHECKS
+from app.db.models import NodeModel, QAIssueModel, SemanticReviewModel
+from app.services.qa.vietnamese_naturalness_critic import NATURALNESS_CHECKS, blocking_issues, naturalness_cache_key
 from app.db.repository import TranslationRepository
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.translation_memory import TranslationMemoryService
@@ -42,7 +42,8 @@ class TranslationCommitService:
                 naturalness_result.get("status") != "PASS"
                 or naturalness_result.get("score") is None
                 or float(naturalness_result.get("score")) < float(naturalness_result.get("pass_threshold", 0.80))
-                or naturalness_result.get("issues")
+                # Cùng quy tắc với VietnameseNaturalnessResult.passed(): ghi chú INFO không chặn lưu.
+                or blocking_issues(naturalness_result.get("issues") or [])
                 or any(checks.get(name) != "PASS" for name in NATURALNESS_CHECKS)
             ):
                 raise ValueError("Candidate chưa được naturalness policy cho phép lưu")
@@ -105,6 +106,21 @@ class TranslationCommitService:
                 review.critic_latency_ms = semantic_result.get("critic_latency_ms", 0.0)
                 review.critic_calls = semantic_result.get("critic_calls", 0)
                 db.flush()
+            if naturalness_result:
+                # Lưu kết luận đã duyệt để QA không phải gọi lại critic cho đoạn chưa bị sửa.
+                db_node = db.query(NodeModel).filter(NodeModel.id == node.id).first()
+                if db_node is not None:
+                    db_node.node_metadata = {
+                        **(db_node.node_metadata or {}),
+                        "naturalness": {
+                            "cache_key": naturalness_cache_key(
+                                node.content, translated_text, naturalness_result.get("critic_model", ""),
+                            ),
+                            "status": naturalness_result.get("status"),
+                            "score": naturalness_result.get("score"),
+                            "verdict_source": naturalness_result.get("verdict_source", "CRITIC"),
+                        },
+                    }
             EntityLedgerService.observe_validated(
                 db, project_id, node.id, node.content, translated_text,
             )

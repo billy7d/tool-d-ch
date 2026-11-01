@@ -84,6 +84,7 @@ venv.bak/
 
 # Testing & Coverage
 .pytest_cache/
+backend/.test-data/
 .coverage
 htmlcov/
 .tox/

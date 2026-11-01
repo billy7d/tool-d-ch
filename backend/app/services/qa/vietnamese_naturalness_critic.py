@@ -2,10 +2,10 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional
 
-from app.services.qa.vietnamese_style_lint import StyleLintIssue, VietnameseStyleLint
+from app.services.qa.vietnamese_style_lint import STYLE_LINT_VERSION, StyleLintIssue, VietnameseStyleLint
 from app.services.translation.context_assembler import estimate_tokens
 
 
@@ -131,9 +131,24 @@ class VietnameseNaturalnessResult:
         }
 
 
-def _blocking_issues(issues: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def blocking_issues(issues: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """INFO là ghi chú tham khảo; chỉ WARNING/ERROR mới chặn PASS."""
     return [item for item in issues or [] if str(item.get("severity", "WARNING")).upper() != "INFO"]
+
+
+_blocking_issues = blocking_issues
+
+
+def naturalness_cache_key(source_text: str, translated_text: str, critic_model: str) -> str:
+    """Khóa tái sử dụng kết luận đã duyệt: đổi chữ, đổi critic, lint hay model thì phải chấm lại."""
+    payload = {
+        "source": source_text or "",
+        "translation": translated_text or "",
+        "prompt_version": NATURALNESS_CRITIC_PROMPT_VERSION,
+        "lint_version": STYLE_LINT_VERSION,
+        "critic_model": critic_model or "",
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _normalize_previous_context(value: Any) -> Any:
@@ -445,6 +460,27 @@ def _lint_verdict(
 
 class VietnameseNaturalnessCritic:
     """Critic chỉ đánh giá tiếng Việt; không tự viết lại candidate."""
+
+    @classmethod
+    def lint_review(
+        cls,
+        source_text: str,
+        translated_text: str,
+        document_type: str = "GENERAL",
+        extra_hints: Optional[List[Dict[str, Any]]] = None,
+        pass_threshold: float = NATURALNESS_PASS_THRESHOLD,
+        rewrite_threshold: float = NATURALNESS_REWRITE_THRESHOLD,
+    ) -> VietnameseNaturalnessResult:
+        """Kết luận chỉ bằng lint, không gọi model.
+
+        Đo thật trên qwen2.5:7b: mỗi lượt critic mất ~30s mà gần như mọi bản sát chữ nó bắt được
+        thì lint cũng đã bắt; lint không báo nhầm bản tự nhiên nào trong bộ đánh giá.
+        """
+        lint_issues = [
+            item.to_hint() for item in VietnameseStyleLint.lint(translated_text, source_text, document_type)
+        ] + [dict(item) for item in extra_hints or []]
+        result = _lint_verdict(lint_issues, pass_threshold, rewrite_threshold, "LINT_ONLY", 0, 0.0, "", [])
+        return replace(result, critic_calls=0)
 
     @classmethod
     def review(

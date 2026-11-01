@@ -10,8 +10,9 @@ class AppSettings(BaseModel):
     
     # Base directories
     BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent
-    DATA_DIR: Path = BASE_DIR / "data"
-    PROJECTS_DIR: Path = BASE_DIR / "data" / "projects"
+    # TOOL_DICH_DATA_DIR cho phép test/benchmark dùng thư mục dữ liệu riêng, không làm bẩn data/ thật.
+    DATA_DIR: Path = Path(os.environ.get("TOOL_DICH_DATA_DIR") or (BASE_DIR / "data"))
+    PROJECTS_DIR: Path = DATA_DIR / "projects"
     FONTS_DIR: Path = BASE_DIR / "fonts"
     LOGS_DIR: Path = BASE_DIR / "logs"
     STATIC_DIR: Path = BASE_DIR / "frontend" / "dist"

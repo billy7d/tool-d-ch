@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { Project, GlossaryItem, TranslationMode, DocumentType, HardwareInfo, TranslationPreviewResponse, AddressTerms } from '../types';
-import { StyleConsistencyPanel } from '../components/StyleConsistencyPanel';
+import { CriticMode, StyleConsistencyPanel } from '../components/StyleConsistencyPanel';
 
 interface Step4SetupProps {
   project: Project;
@@ -38,6 +38,7 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
   const [sentenceStyle, setSentenceStyle] = useState<string>((project.style_guide?.sentence_style as string) || 'MODERATE');
   const [addressTerms, setAddressTerms] = useState<AddressTerms>((project.style_guide?.address_terms as AddressTerms) || {});
   const [criticModel, setCriticModel] = useState<string>((project.style_guide?.naturalness_critic_model as string) || '');
+  const [criticMode, setCriticMode] = useState<CriticMode>((project.style_guide?.naturalness_critic_mode as CriticMode) || 'AUTO');
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TranslationPreviewResponse | null>(null);
 
@@ -73,6 +74,7 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
       register,
       sentence_style: sentenceStyle,
       address_terms: { ...addressTerms, pairs, characters },
+      naturalness_critic_mode: criticMode,
     };
     if (criticModel) {
       guide.naturalness_critic_model = criticModel;
@@ -423,6 +425,8 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
         selectedModel={selectedModel}
         criticModel={criticModel}
         onCriticModelChange={setCriticModel}
+        criticMode={criticMode}
+        onCriticModeChange={setCriticMode}
         installedModels={hardware?.installed_models || []}
       />
 

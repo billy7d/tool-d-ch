@@ -179,6 +179,12 @@ _PATTERN_RULES = (
         "Bỏ 'là': 'mối tương quan đáng kể', 'việc này rất quan trọng'.",
     ),
     _PatternRule(
+        "AI_CUNG_KHONG", "LITERAL_CALQUE", "WARNING",
+        _compile(r"\bai cũng không\b"),
+        "'Ai cũng không …' là dịch sát 'Nobody …'.",
+        "Dùng 'Không ai …'.",
+    ),
+    _PatternRule(
         "DUPLICATED_FUNCTION_WORD", "REDUNDANCY", "WARNING",
         _compile(rf"\b({_FUNCTION_WORDS})\s+\1\b"),
         "Hư từ bị lặp liền nhau.",
