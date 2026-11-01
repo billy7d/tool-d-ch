@@ -144,7 +144,7 @@ class TranslationProvider(ABC):
         model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Review semantic Phase 3; provider cũ có thể chưa hỗ trợ contract này."""
-        raise NotImplementedError("Provider chưa hỗ trợ semantic-critic-v1")
+        raise NotImplementedError("Provider chưa hỗ trợ semantic critic")
 
     def review_naturalness(
         self,

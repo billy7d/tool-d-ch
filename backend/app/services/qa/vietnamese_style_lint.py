@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable, Dict, List, Optional, Pattern
 
 
-STYLE_LINT_VERSION = "vietnamese-style-lint-v1"
+STYLE_LINT_VERSION = "vietnamese-style-lint-v2"
 LONG_SENTENCE_SYLLABLES = 60
 PASSIVE_DENSITY_LIMIT = 3
 
@@ -28,6 +28,8 @@ _FORMAL_DOWNGRADE_TYPES = {"PASSIVE_VOICE", "SENTENCE_FLOW", "NOMINALIZATION"}
 
 _CLAUSE = r"[^.,;:!?\n]"
 _FUNCTION_WORDS = r"của|các|những|và|là|được|bị|cho|với|trong|một|đã|sẽ|đang|thì|mà|này|đó"
+# Danh từ đã từ vựng hóa với "sự", dùng tự nhiên: không phải danh hóa kiểu dịch.
+_LEXICAL_SU = r"(?:thật|kiện|việc|cố|nghiệp|vụ|tích|vật|sống|thể|khác biệt)\b"
 
 
 @dataclass(frozen=True)
@@ -145,6 +147,36 @@ _PATTERN_RULES = (
         _compile(r"\bđể có thể\b"),
         "'để có thể' thường thừa 'có thể'.",
         "Thường chỉ cần 'để'.",
+    ),
+    _PatternRule(
+        "PLURAL_SU_NOUN", "NOMINALIZATION", "WARNING",
+        _compile(rf"\b(?:các|những)\s+sự\s+(?!{_LEXICAL_SU})[^\s.,;:!?]+"),
+        "'các/những sự …' là danh hóa số nhiều kiểu tiếng Anh (vd 'các sự chậm trễ').",
+        "Bỏ 'sự': 'các chậm trễ' -> 'việc chậm trễ' hoặc viết lại bằng động từ.",
+    ),
+    _PatternRule(
+        "MOT_SU_NOUN", "NOMINALIZATION", "INFO",
+        _compile(rf"\bmột\s+sự\s+(?!{_LEXICAL_SU})[^\s.,;:!?]+"),
+        "'một sự …' thường dịch sát mạo từ 'a/an' trước danh từ trừu tượng.",
+        "Cân nhắc bỏ 'một sự' hoặc dùng động từ.",
+    ),
+    _PatternRule(
+        "PAIRED_CONCESSIVE", "REDUNDANCY", "WARNING",
+        _compile(r"\b(?:mặc dù|dù|tuy rằng|tuy)\b[^.!?;]{1,80}?,\s*nhưng\b"),
+        "'Dù/Mặc dù …, nhưng …' thừa quan hệ từ.",
+        "Giữ một vế: 'Dù …, …' hoặc '…, nhưng …'.",
+    ),
+    _PatternRule(
+        "FOREIGN_WORD", "LITERAL_CALQUE", "WARNING",
+        _compile(r"(?<![.\w])(?:brutto|brut|netto|net|gross)(?![.\w])"),
+        "Từ nước ngoài lẫn vào văn xuôi tiếng Việt.",
+        "Dùng thuật ngữ tiếng Việt: 'gộp', 'ròng'.",
+    ),
+    _PatternRule(
+        "LA_ADJECTIVE", "LITERAL_CALQUE", "WARNING",
+        _compile(r"\blà\s+(?:rất\s+)?(?:đáng kể|quan trọng|cần thiết|hiệu quả)(?=\s*[,.;!?]|\s*$)"),
+        "'là + tính từ' cuối vế là dịch sát 'is significant/important'.",
+        "Bỏ 'là': 'mối tương quan đáng kể', 'việc này rất quan trọng'.",
     ),
     _PatternRule(
         "DUPLICATED_FUNCTION_WORD", "REDUNDANCY", "WARNING",

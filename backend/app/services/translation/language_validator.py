@@ -22,7 +22,14 @@ ENGLISH_STOPWORDS = {
     "can", "cannot", "could", "would", "should", "must", "shall", "may",
     "have", "has", "had", "do", "does", "did", "will", "into", "through",
     "enables", "between", "without", "within", "after", "before", "during",
+    # Đại từ và động từ hội thoại: câu văn học tiếng Anh lọt nguyên ("Minh never said he was afraid")
+    # trước đây chỉ khớp được một từ "was" nên không bị bắt.
+    "i", "you", "he", "she", "we", "they", "him", "her", "his", "them", "their", "my", "your", "our",
+    "said", "says", "told", "asked", "replied", "never", "always", "what", "when", "where", "which",
+    "who", "there", "here", "about", "than", "then", "just", "very", "because", "if", "so",
 }
+# Code inline giữ nguyên tiếng Anh một cách hợp lệ, không tính vào phần đánh giá ngôn ngữ.
+INLINE_CODE_PATTERN = re.compile(r"`[^`]*`")
 
 WORD_PATTERN = re.compile(r"[A-Za-zÀ-ỹĐđ]+(?:[-'][A-Za-zÀ-ỹĐđ]+)*", re.UNICODE)
 VIETNAMESE_DIACRITIC_PATTERN = re.compile(
@@ -66,7 +73,7 @@ def validate_target_language(
     if _unexpected_cjk(source_text, text):
         return TargetLanguageValidationResult(False, "FOREIGN_SCRIPT_CONTAMINATION", 0.0, 0.0)
 
-    filtered = URL_OR_IDENTIFIER_PATTERN.sub(" ", text)
+    filtered = URL_OR_IDENTIFIER_PATTERN.sub(" ", INLINE_CODE_PATTERN.sub(" ", text))
     words = [word.lower() for word in WORD_PATTERN.findall(filtered)]
     if not words:
         return TargetLanguageValidationResult(True, None, 1.0, 0.0)

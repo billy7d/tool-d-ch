@@ -214,3 +214,80 @@ def test_provider_keeps_dialogue_quotes_but_unwraps_whole_output_wrapper():
     assert unwrap_quoted_output('"Doanh thu tăng 12%."', "Revenue rose 12%.") == "Doanh thu tăng 12%."
     # Nguồn là một câu thoại trọn vẹn thì cặp ngoặc là của câu thoại, phải giữ.
     assert unwrap_quoted_output('"Đợi anh nhé."', '"Wait for me."') == '"Đợi anh nhé."'
+
+
+# ---------- Critic ngữ nghĩa: JSON lệch schema của qwen2.5:7b ----------
+
+def _semantic(raw):
+    from app.services.qa.semantic_critic import normalize_semantic_payload, validate_semantic_result
+
+    payload, repairs = normalize_semantic_payload(raw)
+    return validate_semantic_result(payload), repairs
+
+
+def test_semantic_fail_with_description_and_partial_checks_is_kept_as_fail():
+    # Đúng hình dạng qwen trả về khi test thật.
+    result, repairs = _semantic({
+        "status": "FAIL", "score": 0.7,
+        "errors": [{"type": "SCOPE_ERROR", "description": "Bản dịch bỏ điều kiện cửa vẫn khóa."}],
+        "checks": {"completeness": "Pass", "meaning": "Partial", "polarity": "Pass", "modality": "Pass",
+                   "causality": "Pass", "scope": "Fail", "entity_reference": "Pass"},
+    })
+    assert result.status == "FAIL"
+    assert result.errors[0]["message"] == "Bản dịch bỏ điều kiện cửa vẫn khóa."
+    assert result.checks["meaning"] == "FAIL"
+    assert "error_message" in repairs
+
+
+def test_semantic_pass_with_boolean_checks_is_accepted():
+    checks = {key: True for key in ("completeness", "meaning", "polarity", "modality", "causality", "scope", "entity_reference")}
+    result, _ = _semantic({"status": "PASS", "score": 1, "errors": [], "checks": checks})
+    assert result.status == "PASS"
+
+
+def test_semantic_failed_checks_without_errors_become_typed_errors():
+    checks = {key: "PASS" for key in ("completeness", "meaning", "polarity", "modality", "causality", "scope", "entity_reference")}
+    checks["modality"] = "FAIL"
+    result, repairs = _semantic({"status": "PASS", "score": 1.0, "errors": [], "checks": checks})
+    assert result.status == "FAIL"
+    assert [error["type"] for error in result.errors] == ["MODALITY_ERROR"]
+    assert result.score < 0.9 and "error_from_check" in repairs
+
+
+def test_semantic_bare_pass_without_checks_still_fails_closed():
+    with pytest.raises(ValueError):
+        _semantic({"status": "PASS", "score": 1.0})
+
+
+# ---------- Hai lỗi của quality gate ----------
+
+def test_windows_path_in_folder_is_not_a_section_reference():
+    source = r"Run npm install before executing the build command in C:\workspace\app."
+    target = r"Trước khi thực thi lệnh build trong thư mục C:\workspace\app, cần chạy lệnh npm install."
+    assert "REFERENCE_ADDITION" not in _codes(source, target)
+    assert "REFERENCE_MISMATCH" in _codes("See Section C.", "Xem danh mục C.")
+
+
+def test_untranslated_english_dialogue_is_rejected():
+    assert "WRONG_TARGET_LANGUAGE" in _codes('"I never said I was afraid," Minh replied.', '"Minh never said he was afraid," anh trả lời.')
+    assert "WRONG_TARGET_LANGUAGE" not in _codes(
+        "Use `if x is None` to check.", "Dùng `if x is None` để kiểm tra.",
+    )
+
+
+# ---------- Luật lint mới ----------
+
+def _lint_rules(text):
+    from app.services.qa.vietnamese_style_lint import VietnameseStyleLint
+
+    return {item.rule: item.severity for item in VietnameseStyleLint.lint(text)}
+
+
+def test_new_lint_rules_from_benchmark_outputs():
+    assert _lint_rules("Kế hoạch đổi để giảm các sự chậm trễ.") == {"PLURAL_SU_NOUN": "WARNING"}
+    assert _lint_rules("Dù mối tương quan rõ, nhưng nguyên nhân chưa rõ.") == {"PAIRED_CONCESSIVE": "WARNING"}
+    assert _lint_rules("Lợi nhuận brutto tăng 15%.") == {"FOREIGN_WORD": "WARNING"}
+    assert _lint_rules("Mối tương quan là đáng kể.") == {"LA_ADJECTIVE": "WARNING"}
+    assert _lint_rules("Đây là một sự từ bỏ quyền.") == {"MOT_SU_NOUN": "INFO"}
+    # Danh từ đã từ vựng hóa và tên nền tảng không bị báo.
+    assert _lint_rules("Sự kiện này là một sự thật; ứng dụng chạy trên .NET.") == {}

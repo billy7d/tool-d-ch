@@ -42,8 +42,11 @@ class ReferenceValidator:
         sorted((re.escape(alias) for alias in ALIASES), key=len, reverse=True)
     )
     IDENTIFIER_PATTERN = r"(?:\d+(?:\.\d+)*|[A-Za-z](?:\.\d+|-[A-Za-z0-9]+)*)"
+    # "thư mục C:\..." từng bị đọc thành "Mục C": loại các từ ghép có "mục" và ký tự ổ đĩa của đường dẫn.
+    NON_REFERENCE_COMPOUNDS = "(?<!thư )(?<!danh )(?<!hạng )(?<!chuyên )(?<!tiêu )"
     REFERENCE_PATTERN = re.compile(
-        rf"(?<!\w)(?P<label>{LABEL_PATTERN})\.?(?!\w)\s+(?P<identifier>{IDENTIFIER_PATTERN})(?![\w-]|\.\d)",
+        rf"(?<!\w){NON_REFERENCE_COMPOUNDS}(?P<label>{LABEL_PATTERN})\.?(?!\w)\s+"
+        rf"(?P<identifier>{IDENTIFIER_PATTERN})(?![\w-]|\.\d|:[\\/])",
         re.IGNORECASE,
     )
 
