@@ -250,7 +250,9 @@ class ContextualTranslationEngine:
             self.config.document_type,
             self.config.translation_mode,
             node_type,
-            limit=4 if str(getattr(self.config, "quality_tier", "")).upper() == "PUBLISHING" else 3,
+            # Context 4K: bộ cắt context vẫn luôn bỏ bớt few-shot ở mọi request, nên chọn sẵn 2 cho đỡ tốn token.
+            limit=2 if getattr(self, "effective_context_window", 8192) <= 4096
+            else (4 if str(getattr(self.config, "quality_tier", "")).upper() == "PUBLISHING" else 3),
             source_text=source_text,
         )
         style_examples = []

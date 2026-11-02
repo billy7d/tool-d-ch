@@ -11,6 +11,18 @@ PAIRWISE_NATURALNESS_SYSTEM_PROMPT = (
 )
 
 
+# Đo trên sách thật: critic 7B hay viết lời giải thích dài (200–290 token, ~15s) và báo "thêm ý" cho
+# cụm có sẵn trong nguồn. Trích đúng cụm tiếng Anh trong nháy đơn để engine tự bác được lời sai.
+SEMANTIC_CRITIC_BREVITY = (
+    " Report only real meaning errors. Before reporting an addition, check the source: a phrase that "
+    "appears in the source is not an addition. Each error message must be at most 20 words and quote the "
+    "exact English phrase from the source in single quotes. Write error messages in English."
+)
+# Không mô tả hình dạng câu trả lời PASS: đo thật, hễ prompt nhắc "return status PASS with an empty
+# errors array" (kể cả kèm "include all seven checks") là qwen2.5:7b chép đúng hình dạng tối giản đó,
+# bỏ checks, và luật "PASS phải báo đủ checks" chặn 9/20 đoạn sách.
+
+
 def output_token_cap(*texts: str, factor: float = 2.0, floor: int = 256, ceiling: int = 2048) -> int:
     """Trần số token output theo độ dài đầu vào (~4 ký tự/token, tiếng Việt tốn token hơn tiếng Anh)."""
     source_tokens = sum(len(text or "") for text in texts) / 4

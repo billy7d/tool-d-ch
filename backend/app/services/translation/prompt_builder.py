@@ -13,19 +13,15 @@ from app.services.translation.term_matcher import TermMatcher
 
 class PromptBuilder:
     MODE_INSTRUCTIONS = {
+        # Bản rút gọn: bản cũ ~220 token lặp lại SYSTEM CORE và style guide; với context 4K của model 7B,
+        # mỗi lần gọi đọc prompt mất ~1 giây cho mỗi ~130 token (đo thật trên GTX 1660 Super).
         "NATURAL": (
-            "Use Natural, fluent Vietnamese suitable for publishing. Preserve meaning, not English wording or grammar. "
-            "Read and understand the complete sentence or paragraph before translating; do not map words one-to-one "
-            "and do not preserve English word order merely because it is grammatical. Recreate each sentence with "
-            "natural Vietnamese syntax and idiomatic Vietnamese collocations. You may move adverbials, change active "
-            "and passive voice when the meaning stays identical, turn nominalizations into verbs, remove needless "
-            "filler, and split or combine sentences when every proposition, reference and relationship is preserved. "
-            "Avoid these anti-patterns: word-for-word translation, English word order, excessive passive voice, "
-            "unnecessary nominalization, awkward literal collocations, redundant phrases, and unsuitable pronoun or "
-            "reference choices. Avoid needless filler such as 'thực hiện việc', 'tiến hành việc' or 'một cách' when "
-            "natural Vietnamese does not need it. Do not invent Sino-Vietnamese or academic terminology when the "
-            "source does not require it. Preserve facts, negation, conditions, modality, scope, causality, entities, "
-            "locked terminology and formatting exactly; naturalness never outranks semantic correctness."
+            "Use Natural, fluent Vietnamese suitable for publishing. Preserve meaning, not English wording or grammar: "
+            "understand the whole sentence, then rewrite it with natural Vietnamese syntax and collocations. You may "
+            "move adverbials, switch passive/active, turn nominalizations into verbs, and split or combine sentences "
+            "when every proposition is kept. Avoid word-for-word translation, English word order, excessive passive "
+            "voice, unnecessary nominalization, awkward literal collocations, redundant phrases ('thực hiện việc', "
+            "'tiến hành việc', 'một cách') and unsuitable pronouns. Naturalness never outranks semantic correctness."
         ),
         "BALANCED": "Balance natural Vietnamese with close semantic alignment.",
         "FAITHFUL": "Stay close to the source structure while keeping grammatical Vietnamese.",
@@ -34,6 +30,7 @@ class PromptBuilder:
         "CUSTOM": "Apply valid user preferences after all correctness rules.",
     }
     # Mô hình nhỏ làm theo ví dụ cụ thể tốt hơn mô tả trừu tượng; mỗi cặp ứng với một luật lint.
+    # Giữ 6 cặp hay gặp nhất: style guide nằm trong mọi request, mỗi cặp ~40 token.
     VIETNAMESE_STYLE_GUIDE = (
         "VIETNAMESE STYLE GUIDE - CÁCH VIẾT TIẾNG VIỆT TỰ NHIÊN\n"
         "Nguyên tắc: ưu tiên động từ thay cho danh từ hóa; đưa chủ thể hành động lên làm chủ ngữ thay vì bị động "
@@ -45,11 +42,7 @@ class PromptBuilder:
         "- Công ty đã đưa ra quyết định để thực hiện hành động. => Công ty quyết định hành động.\n"
         "- Nó là quan trọng để ngủ đủ giấc. => Ngủ đủ giấc là điều quan trọng.\n"
         "- Các hướng dẫn là dễ dàng để làm theo. => Hướng dẫn này rất dễ làm theo.\n"
-        "- Bản cập nhật đã dẫn đến trong một sự giảm độ trễ. => Bản cập nhật giúp giảm độ trễ.\n"
-        "- Để có thể tiết kiệm thời gian, chúng tôi rời đi sớm. => Để tiết kiệm thời gian, chúng tôi đi sớm.\n"
-        "- Báo cáo, cái mà được công bố vào tháng Sáu, có trên mạng. => Báo cáo công bố hồi tháng Sáu hiện đã có trên mạng.\n"
         "- Cô ấy nói rằng cô ấy sẽ quay lại khi cơn mưa dừng lại. => Cô bảo sẽ quay lại khi mưa tạnh.\n"
-        "- Kết quả đã khác biệt từ những gì chúng tôi đã mong đợi. => Kết quả khác với dự đoán của chúng tôi.\n"
         "Các ví dụ chỉ minh họa cách viết; không đưa nội dung của chúng vào bản dịch."
     )
     STYLE_GUIDE_MODES = {"NATURAL", "BALANCED", "CUSTOM"}

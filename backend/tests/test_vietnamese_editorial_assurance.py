@@ -162,7 +162,7 @@ def _engine(db, provider, source, glossary=None, **config_overrides):
 
 
 def _signature():
-    return SimpleNamespace(style_hash="style", glossary_hash="glossary", prompt_version="translation-v3.5-glossary-presets")
+    return SimpleNamespace(style_hash="style", glossary_hash="glossary", prompt_version="translation-v3.6-compact-prompt")
 
 
 def _chapter():

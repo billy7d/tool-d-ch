@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 import re
+import psutil
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -13,6 +15,7 @@ from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
 from app.services.translation.address_terms import ADDRESS_TERMS_CRITIC_INSTRUCTION, ADDRESS_TERMS_REWRITE_INSTRUCTION
 from app.services.translation.provider_base import (
     PAIRWISE_NATURALNESS_SYSTEM_PROMPT,
+    SEMANTIC_CRITIC_BREVITY,
     output_token_cap,
     unwrap_quoted_output,
 )
@@ -21,6 +24,7 @@ from app.services.translation.provider_base import (
 logger = logging.getLogger(__name__)
 # Mẫu 5500 ký tự + schema JSON làm qwen2.5:7b chạy chạm timeout 60s ở mọi chương khi test thật.
 CHAPTER_MEMORY_SAMPLE_CHARS = 3000
+PHYSICAL_CPU_CORES = max(1, psutil.cpu_count(logical=False) or os.cpu_count() or 4)
 
 
 class OllamaProvider(TranslationProvider):
@@ -33,7 +37,14 @@ class OllamaProvider(TranslationProvider):
 
         Không có num_predict, model sa vào vòng lặp (chuỗi chữ Hán khi test thật) sẽ sinh tới hết timeout.
         """
-        options = {"temperature": temperature, "num_ctx": self.effective_context_window(model), "num_predict": int(num_predict)}
+        options = {
+            "temperature": temperature,
+            "num_ctx": self.effective_context_window(model),
+            "num_predict": int(num_predict),
+            # Ollama mặc định chỉ dùng nửa số nhân; với GPU 6GB vài lớp model nằm trên CPU,
+            # dùng đủ nhân vật lý nhanh hơn ~16% khi sinh chữ (đo trên i5 6 nhân + GTX 1660 Super).
+            "num_thread": PHYSICAL_CPU_CORES,
+        }
         options.update(extra)
         return options
 
@@ -390,6 +401,7 @@ class OllamaProvider(TranslationProvider):
             "and checks for completeness, meaning, polarity, modality, causality, scope, entity_reference. "
             "Allowed error types: SEMANTIC_OMISSION, SEMANTIC_ADDITION, MEANING_DRIFT, MODALITY_ERROR, "
             "CAUSALITY_ERROR, SCOPE_ERROR, CONDITION_ERROR, COMPARISON_ERROR, ENTITY_REFERENCE_ERROR, PRONOUN_AMBIGUITY."
+            + SEMANTIC_CRITIC_BREVITY
         )
         user_message = json.dumps({
             "source": source_text, "candidate": translated_text,
@@ -400,7 +412,7 @@ class OllamaProvider(TranslationProvider):
             "model": target_model,
             "messages": [{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
             "format": "json", "stream": False, "keep_alive": "60m",
-            "options": self._options(target_model, 0.0, 700),
+            "options": self._options(target_model, 0.0, 450),
         }
         response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
         if response.status_code != 200:

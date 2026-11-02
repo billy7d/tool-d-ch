@@ -11,6 +11,7 @@ from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
 from app.services.translation.address_terms import ADDRESS_TERMS_CRITIC_INSTRUCTION, ADDRESS_TERMS_REWRITE_INSTRUCTION
 from app.services.translation.provider_base import (
     PAIRWISE_NATURALNESS_SYSTEM_PROMPT,
+    SEMANTIC_CRITIC_BREVITY,
     output_token_cap,
     unwrap_quoted_output,
 )
@@ -274,6 +275,7 @@ class OpenAILocalProvider(TranslationProvider):
             "You are a strict semantic fidelity critic for English-to-Vietnamese translation. "
             "Judge meaning only; accept natural non-literal Vietnamese restructuring. Do not rewrite or use outside knowledge. "
             "Return JSON only: status PASS|FAIL, score, errors, and checks for completeness, meaning, polarity, modality, causality, scope, entity_reference."
+            + SEMANTIC_CRITIC_BREVITY
         )
         payload = {
             "model": target_model,
@@ -285,7 +287,7 @@ class OpenAILocalProvider(TranslationProvider):
                 }, ensure_ascii=False)},
             ],
             "temperature": 0.0,
-            "max_tokens": 700,
+            "max_tokens": 450,
             "response_format": {"type": "json_object"},
         }
         response = self.session.post(

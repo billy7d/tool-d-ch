@@ -145,6 +145,7 @@ class SemanticAssuranceService:
             qa_warnings=warning_codes,
             medium_threshold=engine.config.semantic_risk_medium,
             high_threshold=engine.config.semantic_risk_high,
+            length_risk=bool((getattr(engine.config, "style_guide", {}) or {}).get("semantic_length_risk", False)),
         )
         policy = cls.semantic_policy(engine, max_repairs, warning_codes)
         signature = semantic_signature(

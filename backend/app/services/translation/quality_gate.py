@@ -38,7 +38,8 @@ ENGLISH_RESIDUE_WORDS = {
     "have", "has", "had", "would", "could", "should", "nobody", "somebody", "everybody", "anybody",
     "nothing", "something", "everything", "anything", "never", "always", "said", "because", "which",
     "what", "when", "where", "there", "their", "they", "she", "his", "her", "him", "from", "into",
-    "about", "than", "then", "just", "very", "only", "also", "not", "however", "therefore", "although",
+    # Không có "than": cũng là từ tiếng Việt (than thở, than phiền).
+    "about", "then", "just", "very", "only", "also", "not", "however", "therefore", "although",
 }
 ENGLISH_WORD = re.compile(r"(?<![\w.`/\\-])[a-z]+(?![\w.`/\\-])")
 EITHER_PATTERN = re.compile(r"\beither\b", re.IGNORECASE)
@@ -47,9 +48,41 @@ CA_HAI_PATTERN = re.compile(r"\bcả hai\b", re.IGNORECASE)
 UNTRANSLATED_LABEL = re.compile(r"\b(?:Chapter|Section|Figure|Table|Appendix|Part)\s+\d+(?:\.\d+)*\b")
 
 
+# Từ chức năng tiếng Anh viết hoa ở đầu câu mà từ kế tiếp viết thường: chạy trên sách thật thấy
+# "Since sinh và tử dường như…". Từ kế tiếp viết hoa (tên sách "The Road Less Traveled") thì bỏ qua.
+SENTENCE_START_ENGLISH = re.compile(
+    r"(?:^|(?<=[.!?…:;]\s)|(?<=[“\"(]))"
+    r"(Since|The|However|Although|Because|When|While|If|But|And|This|That|These|Those|There|It|What|Which|Nobody|Nothing|Everything)"
+    r"\s+(?=[a-zà-ỹđ])"
+)
+
+
+_TOKEN = re.compile(r"[^\s“”\"()\[\]—–,;:.!?]+")
+
+
 def _english_residue(text: str) -> List[str]:
     prose = URL_PATTERN.sub(" ", TECHNICAL_TOKEN_PATTERN.sub(" ", text or ""))
-    return sorted({word for word in ENGLISH_WORD.findall(prose) if word in ENGLISH_RESIDUE_WORDS})
+    tokens = [token.strip("'‘’") for token in _TOKEN.findall(prose)]
+    tokens = [token for token in tokens if token]
+    words = set()
+
+    def neighbour(index: int, step: int) -> str:
+        # Bỏ qua các từ chức năng liền nhau ("of the") để tới từ nội dung gần nhất.
+        index += step
+        while 0 <= index < len(tokens) and tokens[index] in ENGLISH_RESIDUE_WORDS:
+            index += step
+        return tokens[index] if 0 <= index < len(tokens) else ""
+
+    for index, token in enumerate(tokens):
+        if token not in ENGLISH_RESIDUE_WORDS:
+            continue
+        if neighbour(index, -1)[:1].isupper() and neighbour(index, 1)[:1].isupper():
+            # Từ chức năng giữa hai từ viết hoa là một phần tên riêng/tựa sách giữ nguyên tiếng Anh
+            # ("Psychology and Religion", "Journey of the Magi").
+            continue
+        words.add(token)
+    words.update(match.group(1) for match in SENTENCE_START_ENGLISH.finditer(prose))
+    return sorted(words)
 
 
 def _technical_tokens(text: str) -> List[str]:

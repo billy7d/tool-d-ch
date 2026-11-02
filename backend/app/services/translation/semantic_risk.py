@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 
-SEMANTIC_POLICY_VERSION = "semantic-policy-v4"
+SEMANTIC_POLICY_VERSION = "semantic-policy-v5"
 
 
 @dataclass(frozen=True)
@@ -42,21 +42,27 @@ class SemanticRiskScorer:
         entity_count: int = 0,
         medium_threshold: Optional[float] = None,
         high_threshold: Optional[float] = None,
+        length_risk: bool = False,
     ) -> SemanticRiskResult:
         source = source_text or ""
         target = translated_text or ""
         reasons: list[str] = []
         value = 0.05
+        # Độ dài/số mệnh đề vẫn được ghi lý do để audit nhưng mặc định không cộng điểm: trên sách thật
+        # (831 đoạn) chúng đẩy 83% số đoạn qua critic, mà critic 7B lại báo sai nhiều nhất ở đoạn dài
+        # (cho là "thêm" những ý có sẵn trong nguồn). Bỏ sót ở đoạn dài vẫn do gate bắt (số, phủ định,
+        # tham chiếu, độ dài, lệch số câu). length_risk=True khôi phục chính sách cũ.
+        length_weight = 1.0 if length_risk else 0.0
         words = len(source.split())
         if words >= 35:
-            value += 0.16
+            value += 0.16 * length_weight
             reasons.append("LONG_SOURCE")
         if words >= 65:
-            value += 0.12
+            value += 0.12 * length_weight
             reasons.append("VERY_LONG_SOURCE")
         clauses = len(re.findall(r"[,;:]|\b(and|or|but|which|that|while)\b", source, re.I))
         if clauses >= 3:
-            value += min(0.18, clauses * 0.03)
+            value += min(0.18, clauses * 0.03) * length_weight
             reasons.append("MULTI_CLAUSE")
         for label, pattern in cls.SENSITIVE.items():
             if re.search(pattern, source, re.I):

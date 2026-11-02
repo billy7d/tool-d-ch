@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional
 
 from app.services.qa.semantic_issue_types import normalize_semantic_issue_type, semantic_severity
@@ -11,7 +11,8 @@ from app.services.translation.semantic_risk import SEMANTIC_POLICY_VERSION, Sema
 
 
 # v2: chuẩn hóa JSON lệch schema (description/true/"Partial") trước khi kiểm tra strict.
-SEMANTIC_CRITIC_PROMPT_VERSION = "semantic-critic-v2"
+# v3: lời critic ngắn, trích cụm tiếng Anh để bác được lời "thêm ý" sai.
+SEMANTIC_CRITIC_PROMPT_VERSION = "semantic-critic-v3"
 _CHECKS = {"completeness", "meaning", "polarity", "modality", "causality", "scope", "entity_reference"}
 
 
@@ -226,6 +227,55 @@ def validate_semantic_result(raw: Any) -> SemanticCriticResult:
     return SemanticCriticResult(status, float(score), normalized_errors, normalized_checks)
 
 
+# Lời critic khẳng định bản dịch "thêm/đưa vào" một ý không có trong nguồn.
+_ADDITION_CLAIM = re.compile(
+    r"not (?:present|found|mentioned|in the (?:original|source))|adds?\b|added|introduc|does not appear|absent from",
+    re.IGNORECASE,
+)
+_QUOTED_SNIPPET = re.compile(r"'([^']{3,120})'|\"([^\"]{3,120})\"|“([^”]{3,120})”|‘([^’]{3,120})’|\(([^()]{3,120})\)")
+_ASCII_TEXT = re.compile(r"^[A-Za-z][A-Za-z0-9 ,.;:'’\-]*$")
+
+
+def _normalize_words(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").casefold()))
+
+
+def refute_false_additions(source_text: str, result: SemanticCriticResult) -> tuple[SemanticCriticResult, int]:
+    """Bỏ lỗi "thêm ý" mà chính cụm critic trích dẫn lại có trong nguồn.
+
+    Đo trên sách thật: với đoạn dài, qwen2.5:7b hay khẳng định bản dịch thêm "reincarnation" hay
+    một câu thơ, trong khi nguồn có đúng cụm đó. Chỉ bác lỗi khi cụm tiếng Anh được trích dẫn xuất
+    hiện nguyên vẹn trong nguồn; lỗi không trích dẫn được hoặc cụm không có trong nguồn vẫn giữ.
+    """
+    if result.status != "FAIL" or not result.errors:
+        return result, 0
+    source = f" {_normalize_words(source_text)} "
+    kept, refuted = [], 0
+    for error in result.errors:
+        message = str(error.get("message", ""))
+        snippets = [
+            next(group for group in match.groups() if group)
+            for match in _QUOTED_SNIPPET.finditer(message)
+        ]
+        english = [snippet for snippet in snippets if _ASCII_TEXT.match(snippet.strip())]
+        if (
+            error.get("type") in {"SEMANTIC_ADDITION", "ENTITY_REFERENCE_ERROR", "SCOPE_ERROR", "MEANING_DRIFT"}
+            and _ADDITION_CLAIM.search(message)
+            and english
+            and all(f" {_normalize_words(snippet)} " in source for snippet in english)
+        ):
+            refuted += 1
+            continue
+        kept.append(error)
+    if not refuted:
+        return result, 0
+    if kept:
+        return replace(result, errors=kept), refuted
+    # Mọi lỗi đều bị bác bằng chính nguồn: coi như PASS.
+    return replace(result, status="PASS", score=max(result.score or 0.0, 0.85), errors=[],
+                   checks={key: "PASS" for key in result.checks}), refuted
+
+
 class SemanticCritic:
     @classmethod
     def review(cls, provider, source_text: str, translated_text: str, glossary: Dict[str, str], entities: Dict[str, str], document_type: str, model: str) -> SemanticCriticResult:
@@ -255,6 +305,9 @@ class SemanticCritic:
             )
             payload, repairs = normalize_semantic_payload(raw)
             result = validate_semantic_result(payload)
+            result, refuted = refute_false_additions(source_text, result)
+            if refuted:
+                repairs = sorted(set(repairs) | {f"claims_refuted:{refuted}"})
             return SemanticCriticResult(
                 result.status, result.score, result.errors, result.checks,
                 critic_request_tokens=request_tokens,
