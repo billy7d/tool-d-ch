@@ -62,3 +62,33 @@ def test_capitalized_english_sentence_start_is_residue_but_titles_are_not():
 def test_ollama_uses_all_physical_cores():
     provider = OllamaProvider()
     assert provider._options("qwen2.5:7b", 0.1, 100)["num_thread"] == PHYSICAL_CPU_CORES >= 1
+
+
+def test_ollama_puts_every_layer_on_gpu_and_falls_back_when_vram_runs_out(monkeypatch):
+    import requests
+    from app.services.translation import ollama_provider as module
+
+    monkeypatch.setattr(module, "_full_gpu_offload", True)
+    provider = OllamaProvider()
+    assert provider._options("qwen2.5:7b", 0.1, 100)["num_gpu"] == module.FULL_GPU_LAYERS
+    sent = []
+
+    def fake_post(self, url, data=None, json=None, **kwargs):
+        sent.append(json)
+        response = requests.Response()
+        failed = "num_gpu" in json["options"]
+        response.status_code = 500 if failed else 200
+        response._content = (b'{"error":"CUDA error: out of memory"}' if failed else b'{"message":{"content":"ok"}}')
+        return response
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    response = provider.session.post("http://x/api/chat", json={"options": provider._options("qwen2.5:7b", 0.1, 10)})
+    assert response.status_code == 200 and len(sent) == 2 and "num_gpu" not in sent[1]["options"]
+    assert "num_gpu" not in provider._options("qwen2.5:7b", 0.1, 100)
+
+
+def test_letter_free_blocks_skip_the_model():
+    from app.services.translation.worker import has_no_words
+
+    assert has_no_words("***") and has_no_words("3.14") and has_no_words("[12]") and has_no_words("— 2019–2020 —")
+    assert not has_no_words("(a)") and not has_no_words("Figure 3.2") and not has_no_words("  ")

@@ -98,6 +98,7 @@ class SemanticAssuranceService:
         cls, engine, chapter, node, translated_text: str, signature, model_name: str,
         created_by: str, instruction: str | None = None,
         resolved_issue_ids=None, latency_ms: float = 0.0, previous_repairs: int = 0,
+        trusted_memory: bool = False,
     ) -> SemanticAssuranceResult:
         # Lazy import để semantic evaluator và publication orchestrator không tạo vòng import.
         from app.services.translation.vietnamese_editorial_assurance import TranslationPublicationAssuranceService
@@ -114,6 +115,7 @@ class SemanticAssuranceService:
             resolved_issue_ids=resolved_issue_ids,
             latency_ms=latency_ms,
             previous_repairs=previous_repairs,
+            trusted_memory=trusted_memory,
         )
 
     @classmethod

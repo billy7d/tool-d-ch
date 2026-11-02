@@ -389,6 +389,7 @@ class TranslationPublicationAssuranceService:
         resolved_issue_ids: Optional[Iterable[str]] = None,
         latency_ms: float = 0.0,
         previous_repairs: int = 0,
+        trusted_memory: bool = False,
     ) -> SemanticAssuranceResult:
         semantic_node = cls._semantic_node(engine, node)
         glossary = dict(getattr(engine, "locked_glossary", {}) or {})
@@ -414,6 +415,29 @@ class TranslationPublicationAssuranceService:
             )
             SemanticAssuranceService.persist_rejected(engine.db, engine.project_id, node, rejected, model_name)
             return rejected
+
+        if trusted_memory:
+            # TM chỉ nhận bản dịch đã qua đủ semantic + naturalness với cùng chữ ký style/glossary/prompt, và
+            # lookup đã chạy lại Quality Gate với glossary hiện tại. Đoạn lặp (chú thích hình, câu định
+            # nghĩa...) không cần gọi lại critic; entity ledger ở trên và gate cuối khi commit vẫn chạy.
+            approved = SemanticAssuranceResult(
+                translated_text, True, "NOT_REQUIRED", 0.0, "LOW", [],
+                semantic_signature(
+                    semantic_node.content, translated_text, glossary, entity_context,
+                    getattr(engine.config, "semantic_critic_model", None) or engine.config.model_name,
+                    engine.config.document_type,
+                    SemanticAssuranceService.semantic_policy(engine, getattr(engine.config, "semantic_max_repairs", 0)),
+                ),
+                from_cache=True, publication_status="APPROVED",
+            )
+            TranslationCommitService.commit_validated_translation(
+                engine.db, engine.project_id, node, approved.translated_text, signature,
+                glossary, model_name, created_by, instruction=instruction,
+                resolved_issue_ids=resolved_issue_ids,
+                semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
+                latency_ms=latency_ms,
+            )
+            return approved
 
         result = SemanticAssuranceService.evaluate_candidate(
             engine,

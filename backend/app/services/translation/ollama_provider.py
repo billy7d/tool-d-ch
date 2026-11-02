@@ -25,6 +25,38 @@ logger = logging.getLogger(__name__)
 # Mẫu 5500 ký tự + schema JSON làm qwen2.5:7b chạy chạm timeout 60s ở mọi chương khi test thật.
 CHAPTER_MEMORY_SAMPLE_CHARS = 3000
 PHYSICAL_CPU_CORES = max(1, psutil.cpu_count(logical=False) or os.cpu_count() or 4)
+# Ollama ước lượng VRAM rất dè dặt: trên GTX 1660 Super 6GB nó chỉ đặt 25/29 lớp qwen2.5:7b lên GPU
+# dù còn trống ~1.4GB; ép đủ lớp vẫn dư ~700MB và sinh chữ 21 -> 50 token/giây. num_gpu=99 nghĩa là
+# "mọi lớp"; khi VRAM thật sự không đủ (app khác chiếm GPU), session tự quay về cách chia của Ollama.
+FULL_GPU_LAYERS = 99
+_GPU_MEMORY_ERROR = re.compile(r"out of memory|cudaMalloc|CUDA error|unable to allocate|runner.*(stopped|terminated)", re.I)
+_full_gpu_offload = os.environ.get("TOOL_DICH_FULL_GPU_OFFLOAD", "1") != "0"
+
+
+def full_gpu_offload_enabled() -> bool:
+    return _full_gpu_offload
+
+
+def disable_full_gpu_offload() -> None:
+    global _full_gpu_offload
+    _full_gpu_offload = False
+
+
+class _GpuFallbackSession(requests.Session):
+    """Nếu ép đủ lớp lên GPU làm Ollama hết VRAM thì tắt hẳn chế độ này và gửi lại đúng yêu cầu đó."""
+
+    def post(self, url, data=None, json=None, **kwargs):
+        response = super().post(url, data=data, json=json, **kwargs)
+        options = (json or {}).get("options") if isinstance(json, dict) else None
+        if (
+            response.status_code >= 500 and isinstance(options, dict) and "num_gpu" in options
+            and _GPU_MEMORY_ERROR.search(response.text or "")
+        ):
+            logger.warning("Ollama không đủ VRAM để đặt mọi lớp lên GPU; quay về cách chia mặc định của Ollama.")
+            disable_full_gpu_offload()
+            retry_payload = dict(json, options={k: v for k, v in options.items() if k != "num_gpu"})
+            response = super().post(url, data=data, json=retry_payload, **kwargs)
+        return response
 
 
 class OllamaProvider(TranslationProvider):
@@ -45,6 +77,8 @@ class OllamaProvider(TranslationProvider):
             # dùng đủ nhân vật lý nhanh hơn ~16% khi sinh chữ (đo trên i5 6 nhân + GTX 1660 Super).
             "num_thread": PHYSICAL_CPU_CORES,
         }
+        if full_gpu_offload_enabled():
+            options["num_gpu"] = FULL_GPU_LAYERS
         options.update(extra)
         return options
 
@@ -53,7 +87,7 @@ class OllamaProvider(TranslationProvider):
         self.default_model = default_model
         
         # High-performance persistent HTTP session with connection pooling
-        self.session = requests.Session()
+        self.session = _GpuFallbackSession()
         adapter = HTTPAdapter(
             pool_connections=10,
             pool_maxsize=20,

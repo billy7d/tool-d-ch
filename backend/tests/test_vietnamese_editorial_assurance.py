@@ -374,3 +374,19 @@ def test_naturalness_error_is_fail_closed_without_editorial_rewrite(db):
     assert provider.editorial_calls == 0
     assert db.query(NodeModel).filter_by(id=node.id).one().translated_content is None
     assert db.query(TranslationMemoryModel).count() == 0
+
+
+def test_trusted_memory_hit_commits_without_critic_calls(db):
+    # TM chỉ chứa bản đã qua đủ semantic + naturalness: đoạn lặp lại không gọi critic lần nữa.
+    provider = ScriptedProvider([_naturalness("FAIL", 0.2)], "Không được dùng")
+    source = "If you do not pay the fee, you must leave the building."
+    engine, node = _engine(db, provider, source)
+
+    result = SemanticAssuranceService.assure_and_commit(
+        engine, _chapter(), node, "Nếu không trả phí, bạn phải rời khỏi tòa nhà.", _signature(), "mock", "test",
+        trusted_memory=True,
+    )
+
+    assert result.approved is True and result.from_cache is True
+    assert provider.semantic_calls == provider.naturalness_calls == provider.editorial_calls == 0
+    assert db.query(NodeModel).filter_by(id=node.id).one().translated_content.startswith("Nếu không trả phí")
