@@ -85,6 +85,64 @@ def _english_residue(text: str) -> List[str]:
     return sorted(words)
 
 
+# Chạy sách thật: qwen2.5:7b để lọt từ nội dung tiếng Anh ("strong", "passively", "parable", "discipline
+# thường là…") và cả từ méo ("individul", "Therapeut") mà danh sách hư từ ở trên không bắt được.
+# Từ chỉ gồm chữ không dấu mà không ghép được thành một âm tiết tiếng Việt (phụ âm đầu + vần) thì
+# không phải tiếng Việt. Từ có dấu tiếng Việt ("Kitô", "ôxy") là phiên âm, bỏ qua.
+_VI_INITIAL = "(?:ngh|ng|nh|ch|gh|gi|kh|ph|qu|th|tr|b|c|d|g|h|k|l|m|n|p|r|s|t|v|x)?"
+_VI_SYLLABLE = re.compile(f"^{_VI_INITIAL}[aeiouy]+(?:ng|nh|ch|c|m|n|p|t)?$")
+_ASCII_WORD = re.compile(r"(?<![\w@#$%&+=/\\.-])[A-Za-z]+(?![\w@/\\-]|\.\w)")
+_PARENTHESIZED = re.compile(r"\([^()]*\)")
+# Một từ đứng riêng trong ngoặc là chữ đang được bàn tới (từ “conscious” có gốc Latinh…), không phải lọt.
+_QUOTED_SINGLE_WORD = re.compile(r"[“\"‘']([A-Za-z]+)[”\"’']")
+_LOWER_ROMAN = re.compile(r"^x{0,3}(?:ix|iv|v?i{0,3})$")
+# Từ mượn và đơn vị đã thành thông dụng trong văn viết tiếng Việt.
+VIETNAMESE_LOANWORDS = {
+    "ok", "email", "internet", "online", "offline", "video", "web", "website", "blog", "game", "file", "app",
+    "wifi", "pizza", "taxi", "radio", "piano", "guitar", "violin", "jazz", "rock", "pop", "golf", "tennis",
+    "menu", "show", "shop", "laptop", "smartphone", "robot", "virus", "vitamin", "protein", "sandwich",
+    "hamburger", "cocktail", "selfie", "livestream", "marketing", "startup", "logo", "slogan", "poster",
+    "bar", "sofa", "opera", "yoga", "acid", "ballet", "karaoke", "logic", "ego", "tivi",
+    "electron", "proton", "neutron",
+    "kg", "km", "cm", "mm", "ml", "mg", "kw", "kwh", "mb", "gb", "tb", "kb", "hz", "mhz", "ghz", "ppm",
+    "gram", "inch", "feet", "ounce", "pound", "yard", "mile",
+    # Viết tắt trong trích dẫn, chú thích.
+    "tr", "ed", "eds", "trans", "vol", "pp", "ibid", "etc", "vs",
+}
+
+
+def _non_vietnamese_words(source_text: str, text: str, locked_glossary=None) -> List[str]:
+    prose = TECHNICAL_TOKEN_PATTERN.sub(" ", URL_PATTERN.sub(" ", text or ""))
+    # "học máy (machine learning)": giữ thuật ngữ gốc trong ngoặc là cách viết chuẩn.
+    prose = _PARENTHESIZED.sub(" ", prose)
+    prose = _QUOTED_SINGLE_WORD.sub(
+        lambda match: " " if match.group(1).lower() in (source_text or "").lower() else match.group(0), prose,
+    )
+    source_lower_words = set(re.findall(r"\b[a-z]+\b", source_text or ""))
+    allowed = {
+        word.lower()
+        for _, target, _, variants in GlossaryValidator._entries(locked_glossary or {})
+        for value in [target, *variants]
+        for word in re.findall(r"[A-Za-z]+", value or "")
+    }
+    found = []
+    for match in _ASCII_WORD.finditer(prose):
+        word = match.group(0)
+        lower = word.lower()
+        if (
+            len(word) < 2 or lower in VIETNAMESE_LOANWORDS or lower in allowed or lower in ENGLISH_RESIDUE_WORDS
+            or _VI_SYLLABLE.match(lower) or _LOWER_ROMAN.match(word)
+        ):
+            continue  # hư từ tiếng Anh đã có _english_residue xử lý (kể cả trong tựa sách)
+        if any(char.isupper() for char in word[1:]):
+            continue  # viết tắt, số La Mã, camelCase/iPhone
+        if word[0].isupper() and lower not in source_lower_words:
+            continue  # tên riêng, tựa sách giữ nguyên ("Freud", "How People Change"); "Strong" đầu câu vẫn bắt
+        if word not in found:
+            found.append(word)
+    return found
+
+
 def _technical_tokens(text: str) -> List[str]:
     return [token.rstrip(".,;:") for token in TECHNICAL_TOKEN_PATTERN.findall(text or "")]
 
@@ -233,6 +291,7 @@ class TranslationQualityGate:
                 ))
 
             residue = _english_residue(target)
+            residue += [word for word in _non_vietnamese_words(source, target, locked_glossary) if word not in residue]
             if residue:
                 issues.append(self._issue(
                     "ENGLISH_RESIDUE", "ERROR",

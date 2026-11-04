@@ -92,3 +92,30 @@ def test_letter_free_blocks_skip_the_model():
 
     assert has_no_words("***") and has_no_words("3.14") and has_no_words("[12]") and has_no_words("— 2019–2020 —")
     assert not has_no_words("(a)") and not has_no_words("Figure 3.2") and not has_no_words("  ")
+
+
+def test_untranslated_content_words_are_caught_by_vietnamese_syllable_shape():
+    from app.services.translation.quality_gate import TranslationQualityGate, _non_vietnamese_words
+
+    source = "Rachel was strong, but the child kept clinging to discipline; Freud agreed."
+    assert _non_vietnamese_words(source, "Rachel vẫn strong, đứa trẻ clinging đến discipline.") == [
+        "strong", "clinging", "discipline",
+    ]
+    assert _non_vietnamese_words(source, "Strong như vậy, Freud đồng ý.") == ["Strong"]
+    result = TranslationQualityGate().validate(source, "Rachel vẫn strong, nhưng đứa trẻ bám lấy kỷ luật; Freud đồng ý.", {})
+    assert any(issue["code"] == "ENGLISH_RESIDUE" and "strong" in issue["message"] for issue in result.issues)
+
+
+def test_vietnamese_names_loanwords_and_kept_terms_are_not_flagged():
+    from app.services.translation.quality_gate import _non_vietnamese_words
+
+    source = "Freud read How People Change. The word conscious comes from con. Machine learning and the API."
+    for text in [
+        "Người ta nghiêng ngả, khuya khoắt quanh khuynh hướng ấy.",
+        "Freud đọc cuốn How People Change ở Rembrandt.",  # tên riêng, tựa sách viết hoa
+        "Từ “conscious” có gốc Latinh.",  # chữ đang được bàn tới
+        "học máy (machine learning) qua API, gửi email, 5 kg, trang ix, Kitô giáo, ôxy, iPhone.",
+        r"đọc C:\x\y.txt và https://a.com/b",
+    ]:
+        assert _non_vietnamese_words(source, text) == [], text
+    assert _non_vietnamese_words("Use the framework.", "Dùng framework này.", {"framework": "framework"}) == []

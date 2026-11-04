@@ -40,10 +40,19 @@ class MockProvider(TranslationProvider):
 
     @classmethod
     def _vietnamize_function_words(cls, text: str) -> str:
+        from app.services.translation.quality_gate import _non_vietnamese_words
+
         def swap(match):
             word = match.group(0)
             return cls.FUNCTION_WORDS.get(word.lower(), word) if word.lower() in cls.FUNCTION_WORDS else word
-        return re.sub(r"\s{2,}", " ", cls._FUNCTION_WORD.sub(swap, text)).strip()
+        swapped = re.sub(r"\s{2,}", " ", cls._FUNCTION_WORD.sub(swap, text)).strip()
+        # Từ nội dung tiếng Anh còn lại được bọc ngoặc như thuật ngữ giữ nguyên, để output mock qua được
+        # kiểm tra âm tiết tiếng Việt mà vẫn giữ nguyên từ cho các test pipeline.
+        leftovers = set(_non_vietnamese_words(swapped.lower(), swapped))
+        return re.sub(
+            r"(?<![\w(])[A-Za-z]+(?![\w)])",
+            lambda match: f"({match.group(0)})" if match.group(0) in leftovers else match.group(0), swapped,
+        )
 
     def health_check(self) -> bool:
         return True
