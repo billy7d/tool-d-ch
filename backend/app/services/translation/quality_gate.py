@@ -17,6 +17,7 @@ SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
 WORD_PATTERN = re.compile(r"\w+", re.UNICODE)
 # Câu ngắn trùng nhau là bình thường ("Anh gật đầu."); chỉ coi là chép khi câu đủ dài và gần như trùng hẳn.
 CONTEXT_LEAK_MIN_WORDS = 6
+CONTEXT_LEAK_MIN_WORDS_SAME_LENGTH = 12
 CONTEXT_LEAK_OVERLAP = 0.8
 
 
@@ -96,19 +97,47 @@ _PARENTHESIZED = re.compile(r"\([^()]*\)")
 # Một từ đứng riêng trong ngoặc là chữ đang được bàn tới (từ “conscious” có gốc Latinh…), không phải lọt.
 _QUOTED_SINGLE_WORD = re.compile(r"[“\"‘']([A-Za-z]+)[”\"’']")
 _LOWER_ROMAN = re.compile(r"^x{0,3}(?:ix|iv|v?i{0,3})$")
+# Từ được chính nguồn giải nghĩa phải giữ nguyên: "the Latin con, meaning “with,” and scire, meaning “to know.”"
+_DEFINED_WORD = re.compile(r"\b([A-Za-z]+)\b[,\"”'’]*\s+(?:meaning|means)\b")
+# Cả cụm trong ngoặc được giải nghĩa cũng giữ nguyên: ‘‘Dilige et quod vis fac,” meaning “If you are loving…”.
+_DEFINED_PHRASE = re.compile(r"[“\"‘']+([^”\"’]{2,80}?)[,.]?[”\"’']+\s+(?:meaning|means)\b")
+# Model đôi khi bình luận về chính bản dịch ("… không phù hợp với ngữ cảnh, nên cần điều chỉnh thành…", "(Note: …").
+# Trên 908 đoạn đã dịch của sách thật mẫu này không bắt nhầm đoạn nào.
+MODEL_COMMENTARY = re.compile(
+    r"\(\s*(?:Note|Lưu ý|Ghi chú)\s*:|(?:^|[.!?…:”\"]\s+)(?:Note|Lưu ý|Ghi chú)\s*:"
+    r"|\bdưới đây là bản dịch\b|\bbản dịch (?:được |đã )?(?:sửa|điều chỉnh|đúng|chính xác)|\bdịch lại (?:thành|sang|như)\b"
+    r"|\bdịch sang tiếng Việt\b|\bbản gốc\b|\bnguyên văn\b|\bcải chính\b|\bđiều chỉnh thành\b|\bsửa lại đúng\b"
+    r"|\bkhông phù hợp với ngữ cảnh\b",
+    re.IGNORECASE,
+)
+# Nguồn đang nói về chính việc dịch hay ghi chú thì các từ trên có thể là nội dung thật.
+COMMENTARY_EXEMPT_SOURCE = re.compile(r"translat|\boriginal\b|\bnote\b|\bverbatim\b", re.IGNORECASE)
 # Từ mượn và đơn vị đã thành thông dụng trong văn viết tiếng Việt.
 VIETNAMESE_LOANWORDS = {
     "ok", "email", "internet", "online", "offline", "video", "web", "website", "blog", "game", "file", "app",
     "wifi", "pizza", "taxi", "radio", "piano", "guitar", "violin", "jazz", "rock", "pop", "golf", "tennis",
     "menu", "show", "shop", "laptop", "smartphone", "robot", "virus", "vitamin", "protein", "sandwich",
     "hamburger", "cocktail", "selfie", "livestream", "marketing", "startup", "logo", "slogan", "poster",
-    "bar", "sofa", "opera", "yoga", "acid", "ballet", "karaoke", "logic", "ego", "tivi",
+    "bar", "sofa", "opera", "yoga", "acid", "axit", "ballet", "karaoke", "logic", "ego", "tivi",
     "electron", "proton", "neutron",
     "kg", "km", "cm", "mm", "ml", "mg", "kw", "kwh", "mb", "gb", "tb", "kb", "hz", "mhz", "ghz", "ppm",
     "gram", "inch", "feet", "ounce", "pound", "yard", "mile",
     # Viết tắt trong trích dẫn, chú thích.
     "tr", "ed", "eds", "trans", "vol", "pp", "ibid", "etc", "vs",
 }
+
+
+# Sau chữ có dấu, vần tiếng Việt chỉ còn tối đa 3 chữ cái ("ô"+"ng", "ế"+"ng"). Dài hơn là chữ bị dính với
+# tiếng Anh: chạy sách thật thấy "khôngscious", "Củasciousness", "tráiDependency" lọt qua vì kiểm tra từ
+# ASCII không thấy biên từ. Chiều ngược lại, trước chữ có dấu tiếng Việt có tối đa 4 chữ cái ("nghi"+"êng",
+# "thuy"+"ết"); từ 5 chữ trở lên là tiếng Anh dính vào trước: lượt sửa câu viết "coldhearted" thành "coldlòng".
+_FUSED_WORD = re.compile(r"\w*(?:(?![A-Za-z0-9_])\w)[A-Za-z]{5,}\w*|\w*[A-Za-z]{5,}(?:(?![A-Za-z0-9_])\w)\w*")
+
+
+def _fused_words(source_text: str, text: str) -> List[str]:
+    source = source_text or ""
+    # Tên riêng có dấu trong nguồn ("Éluard") vẫn được giữ nguyên.
+    return [match.group(0) for match in _FUSED_WORD.finditer(text or "") if match.group(0) not in source]
 
 
 def _non_vietnamese_words(source_text: str, text: str, locked_glossary=None) -> List[str]:
@@ -125,7 +154,10 @@ def _non_vietnamese_words(source_text: str, text: str, locked_glossary=None) -> 
         for value in [target, *variants]
         for word in re.findall(r"[A-Za-z]+", value or "")
     }
-    found = []
+    allowed.update(word.lower() for word in _DEFINED_WORD.findall(source_text or ""))
+    for phrase in _DEFINED_PHRASE.findall(source_text or ""):
+        allowed.update(word.lower() for word in re.findall(r"[A-Za-z]+", phrase))
+    found = list(dict.fromkeys(_fused_words(source_text, prose)))
     for match in _ASCII_WORD.finditer(prose):
         word = match.group(0)
         lower = word.lower()
@@ -208,9 +240,14 @@ class TranslationQualityGate:
         previous_sentences = [
             _word_set(sentence) for text in context_translations for sentence in SENTENCE_SPLIT.split(text or "")
         ]
-        for sentence in SENTENCE_SPLIT.split(target):
+        target_sentences = SENTENCE_SPLIT.split(target)
+        # Bản dịch không dài hơn nguồn thì câu ngắn trùng đoạn trước là do tác giả lặp ý ("You do have a problem."),
+        # không phải model chép thêm: chạy sách thật thấy bị chặn oan cả đoạn. Câu dài trùng hẳn vẫn bị bắt.
+        added_sentences = len(target_sentences) > len(SENTENCE_SPLIT.split(source))
+        minimum_words = CONTEXT_LEAK_MIN_WORDS if added_sentences else CONTEXT_LEAK_MIN_WORDS_SAME_LENGTH
+        for sentence in target_sentences:
             words = _word_set(sentence)
-            if len(words) < CONTEXT_LEAK_MIN_WORDS:
+            if len(words) < minimum_words:
                 continue
             if any(len(words & other) / len(words | other) >= CONTEXT_LEAK_OVERLAP for other in previous_sentences if other):
                 issues.append(TranslationQualityGate._issue(
@@ -283,6 +320,13 @@ class TranslationQualityGate:
                 ))
 
             issues.extend(self._content_addition_issues(source, target, context_translations or []))
+
+            commentary = None if COMMENTARY_EXEMPT_SOURCE.search(source) else MODEL_COMMENTARY.search(target)
+            if commentary:
+                issues.append(self._issue(
+                    "MODEL_COMMENTARY", "ERROR",
+                    f"Bản dịch có lời bình của model thay vì nội dung nguồn: \"{commentary.group(0).strip()}\".",
+                ))
 
             if EITHER_PATTERN.search(source) and not BOTH_PATTERN.search(source) and CA_HAI_PATTERN.search(target):
                 issues.append(self._issue(

@@ -29,6 +29,8 @@ from app.services.translation.vietnamese_post_processor import VietnamesePostPro
 
 EDITORIAL_REWRITE_PROMPT_VERSION = "editorial-rewrite-v1"
 MAX_EDITORIAL_REWRITE_ATTEMPTS = 1
+# Gợi ý riêng của project (xưng hô, quy tắc người biên tập, thuật ngữ) chỉ ra đúng chỗ phải đổi nên vẫn đi đường viết lại.
+PROJECT_HINT_RULES = frozenset({"ADDRESS_READER_MISMATCH", "PROJECT_STYLE_RULE", "SOFT_TERM_MISSED"})
 
 
 class TranslationPublicationAssuranceService:
@@ -341,9 +343,16 @@ class TranslationPublicationAssuranceService:
             SemanticAssuranceService.persist_rejected(
                 engine.db, engine.project_id, db_node, result, model_name,
             )
-        for issue in naturalness_result_to_qa_issues(
-            naturalness, db_node.content, result.translated_text,
-        ):
+        cls._save_naturalness_issues(engine, db_node, naturalness, result.translated_text)
+        db_node.status = "NEEDS_REVIEW"
+        save_review_draft(
+            db_node, result.translated_text, [issue.get("type") for issue in naturalness.issues], "NATURALNESS",
+        )
+        engine.db.commit()
+
+    @staticmethod
+    def _save_naturalness_issues(engine, db_node, naturalness: VietnameseNaturalnessResult, translated_text: str) -> None:
+        for issue in naturalness_result_to_qa_issues(naturalness, db_node.content, translated_text):
             existing = engine.db.query(QAIssueModel).filter(
                 QAIssueModel.project_id == engine.project_id,
                 QAIssueModel.node_id == db_node.id,
@@ -369,11 +378,19 @@ class TranslationPublicationAssuranceService:
                     suggested_fix=issue["suggested_fix"],
                     status="OPEN",
                 ))
-        db_node.status = "NEEDS_REVIEW"
-        save_review_draft(
-            db_node, result.translated_text, [issue.get("type") for issue in naturalness.issues], "NATURALNESS",
-        )
-        engine.db.commit()
+
+    @staticmethod
+    def _style_notes_only(naturalness: VietnameseNaturalnessResult) -> bool:
+        """Chỉ có lint văn phong chung, không critic nào xác nhận: ghi lại làm cảnh báo, không viết lại, không chặn.
+
+        Đo trên 80 đoạn sách thật: 6/10 lượt viết lại trả về nguyên văn, các lượt có sửa thường xóa mất ý
+        ("là một vị thần", "và bị ép buộc"), 9/10 đoạn vẫn phải chờ duyệt vì lint còn nguyên, trong khi bước này
+        tốn ~15% thời gian dịch. Với critic LLM (tier PUBLISHING) kết luận có người chấm nên vẫn đi đường viết lại.
+        """
+        if naturalness.verdict_source != "LINT_ONLY" or naturalness.status != "FAIL":
+            return False
+        warnings = [item for item in naturalness.lint_issues if str(item.get("severity", "")).upper() == "WARNING"]
+        return bool(warnings) and all(item.get("rule") not in PROJECT_HINT_RULES for item in warnings)
 
     @classmethod
     def assure_and_commit(
@@ -477,6 +494,35 @@ class TranslationPublicationAssuranceService:
                 latency_ms=latency_ms,
                 naturalness_result=cls._naturalness_payload(naturalness, pass_threshold, cls.critic_self_review(engine), cls.critic_model(engine)),
             )
+            return approved
+
+        if cls._style_notes_only(naturalness):
+            checked = result
+            if result.status == "NOT_REQUIRED":
+                # Đoạn có cảnh báo văn phong trước đây luôn được critic đọc lại sau khi viết lại: giữ nguyên độ phủ đó.
+                checked = SemanticAssuranceService.evaluate_candidate(
+                    engine, chapter, semantic_node, result.translated_text, entity_context,
+                    previous_repairs=previous_repairs, max_repairs=0, force_critic=True,
+                )
+                if not checked.approved:
+                    SemanticAssuranceService.persist_rejected(engine.db, engine.project_id, node, checked, model_name)
+                    return checked
+            advisory = replace(
+                naturalness, status="PASS", score=pass_threshold, issues=[],
+                checks={key: "PASS" for key in NATURALNESS_CHECKS}, verdict_source="LINT_ADVISORY",
+            )
+            approved = cls._attach_naturalness(checked, advisory, publication_status="APPROVED")
+            TranslationCommitService.commit_validated_translation(
+                engine.db, engine.project_id, node, approved.translated_text, signature,
+                glossary, model_name, created_by, instruction=instruction,
+                resolved_issue_ids=resolved_issue_ids,
+                semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
+                latency_ms=latency_ms,
+                naturalness_result=cls._naturalness_payload(advisory, pass_threshold, cls.critic_self_review(engine), cls.critic_model(engine)),
+            )
+            db_node = engine.db.query(NodeModel).filter(NodeModel.id == node.id).first()
+            cls._save_naturalness_issues(engine, db_node, naturalness, approved.translated_text)
+            engine.db.commit()
             return approved
 
         if not naturalness.rewrite_allowed(rewrite_threshold, pass_threshold) or not cls._rewrite_permitted(engine, naturalness, node):

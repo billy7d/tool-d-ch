@@ -40,6 +40,69 @@ class NumericValidationResult:
     unexpected: List[NumericToken]
 
 
+_EN_SMALL = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19,
+}
+_EN_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_EN_SCALES = {"hundred": 100, "thousand": 1000, "million": 1000000}
+_EN_NUMBER_WORD = re.compile(
+    r"\b(?:(?P<tens>" + "|".join(_EN_TENS) + r")(?:[- ](?P<tens_unit>" + "|".join(list(_EN_SMALL)[:9]) + r"))?"
+    r"|(?P<small>" + "|".join(sorted(_EN_SMALL, key=len, reverse=True)) + r")|\ba)"
+    r"(?:[- ](?P<scale>" + "|".join(_EN_SCALES) + r"))?\b",
+    re.IGNORECASE,
+)
+_EN_PERCENT = re.compile(r"\s+per\s?cent\b", re.IGNORECASE)
+
+
+def spelled_english_numbers(text: str) -> Counter:
+    """Số viết bằng chữ trong nguồn: "when I was nine" dịch thành "khi tôi 9 tuổi" không phải số tự thêm."""
+    values: Counter = Counter()
+    for match in _EN_NUMBER_WORD.finditer(text or ""):
+        if match.group("tens"):
+            value = _EN_TENS[match.group("tens").lower()] + _EN_SMALL.get((match.group("tens_unit") or "").lower(), 0)
+        elif match.group("small"):
+            value = _EN_SMALL[match.group("small").lower()]
+        elif match.group("scale"):
+            value = 1  # "a hundred"
+        else:
+            continue  # mạo từ "a" đứng riêng
+        if match.group("scale"):
+            value *= _EN_SCALES[match.group("scale").lower()]
+        percent = _EN_PERCENT.match(text, match.end())
+        values[f"{value}%" if percent else str(value)] += 1
+    return values
+
+
+_VI_DIGITS = {1: "một", 2: "hai", 3: "ba", 4: "bốn", 5: "năm", 6: "sáu", 7: "bảy", 8: "tám", 9: "chín"}
+
+
+def _vietnamese_number_pattern(value: int) -> Optional[str]:
+    if value in _VI_DIGITS:
+        return _VI_DIGITS[value]
+    if value == 10:
+        return "mười"
+    if 11 <= value <= 19:
+        return "mười " + ("lăm" if value == 15 else _VI_DIGITS[value - 10])
+    if 20 <= value <= 99:
+        tens = f"{_VI_DIGITS[value // 10]} mươi"
+        unit = value % 10
+        if not unit:
+            return tens
+        unit_word = {1: "mốt", 4: "(?:tư|bốn)", 5: "lăm"}.get(unit, _VI_DIGITS[unit])
+        return f"{tens} {unit_word}"
+    return None
+
+
+def _spelled_in_vietnamese(key: str, text: str) -> int:
+    """Số lần con số đã được viết bằng chữ tiếng Việt, tức là đã dùng hết số viết bằng chữ tương ứng của nguồn."""
+    if not key.rstrip("%").isdigit():
+        return 0
+    pattern = _vietnamese_number_pattern(int(key.rstrip("%")))
+    return len(re.findall(rf"(?<!\w){pattern}(?!\w)", text or "", re.IGNORECASE)) if pattern else 0
+
+
 def _normalize_decimal(raw: str) -> str:
     sign = ""
     value = raw.strip()
@@ -112,5 +175,17 @@ class NumericValidator:
 
         missing = expand(source_tokens, missing_counts)
         unexpected = expand(target_tokens, unexpected_counts)
+        spelled = spelled_english_numbers(source_text)
+        # "ten years ago" đã dịch là "mười năm" thì chữ "lớp 10" là số tự thêm: chạy sách thật thấy "junior year" -> "lớp 10".
+        for key in list(spelled):
+            spelled[key] -= _spelled_in_vietnamese(key, translated_text)
+        kept = []
+        for token in unexpected:
+            key = f"{token.normalized_value}%" if token.percent else token.normalized_value
+            if not (token.currency or token.unit) and spelled[key] > 0:
+                spelled[key] -= 1
+            else:
+                kept.append(token)
+        unexpected = kept
         # Candidate chỉ đạt khi bảo toàn đủ số nguồn và không tự thêm số mới.
         return NumericValidationResult(not missing and not unexpected, missing, unexpected)

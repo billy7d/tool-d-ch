@@ -34,21 +34,17 @@ def test_chinese_character_detection():
 
 
 class FlakyChineseProvider(MockProvider):
-    """
-    Provider that returns Chinese-contaminated output on first batch attempt,
-    but returns clean pure Vietnamese on single translate fallback.
-    """
-    def translate(self, blocks, system_prompt, user_prompt, model=None, temperature=0.2):
-        results = []
-        for b in blocks:
-            b_id = b.get("id") or b.get("node_id", "")
-            if "2" in b_id:
-                results.append({"node_id": b_id, "text": "Đoạn này bị dính chữ Hán 这是一个错误 và cần dịch lại."})
-            else:
-                results.append({"node_id": b_id, "text": f"Bản dịch tiếng Việt sạch 100% cho {b_id}"})
-        return results
+    """Đoạn thứ hai đầy chữ Hán ở lần dịch đầu nên phải dịch lại; lần repair trả bản sạch."""
+
+    def __init__(self):
+        self.second_paragraph_calls = 0
 
     def translate_single(self, text, system_prompt, glossary_terms=None, model=None, temperature=0.2):
+        if not text.startswith("Second"):
+            return "Đoạn đầu tiên đã được dịch sạch sẽ sang tiếng Việt."
+        self.second_paragraph_calls += 1
+        if self.second_paragraph_calls == 1:
+            return "这是一个严重错误需要重新翻译 và cần dịch lại."
         return "Bản dịch đã được tự động sửa lại thành tiếng Việt chuẩn không có chữ Hán."
 
 

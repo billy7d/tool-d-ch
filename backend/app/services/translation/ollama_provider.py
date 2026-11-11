@@ -14,8 +14,11 @@ from app.services.qa.result_validator import qa_error, validate_qa_result
 from app.services.qa.vietnamese_style_lint import CRITIC_STYLE_HINT_INSTRUCTION
 from app.services.translation.address_terms import ADDRESS_TERMS_CRITIC_INSTRUCTION, ADDRESS_TERMS_REWRITE_INSTRUCTION
 from app.services.translation.provider_base import (
+    CHAPTER_MEMORY_SCHEMA,
+    EDIT_TASK_PREAMBLE,
     PAIRWISE_NATURALNESS_SYSTEM_PROMPT,
     SEMANTIC_CRITIC_BREVITY,
+    SEMANTIC_CRITIC_SCHEMA,
     output_token_cap,
     unwrap_quoted_output,
 )
@@ -290,7 +293,9 @@ class OllamaProvider(TranslationProvider):
 
     def summarize_context(self, text_sample: str, model: Optional[str] = None, max_input_chars: Optional[int] = 4000) -> str:
         target_model = model or self.default_model
-        sys_msg = "Summarize the key topic, main characters/entities, terminology, and tone of this section in 3-4 bullet points (in Vietnamese)."
+        # Tóm tắt bằng tiếng Anh: bản tiếng Việt của model nhỏ viết méo từ ("sự phụ thuộc passiv") rồi lượt dịch
+        # chép lại từ đó vào bản dịch, khiến nhiều đoạn dính ENGLISH_RESIDUE khi chạy sách thật.
+        sys_msg = "Summarize the key topic, main characters/entities, terminology, and tone of this section in 3-4 bullet points (in English)."
         payload = {
             "model": target_model,
             "messages": [
@@ -338,7 +343,7 @@ class OllamaProvider(TranslationProvider):
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message},
             ],
-            "format": "json",
+            "format": CHAPTER_MEMORY_SCHEMA,
             "stream": False,
             "keep_alive": "60m",
             "options": self._options(target_model, 0.1, 700),
@@ -444,8 +449,8 @@ class OllamaProvider(TranslationProvider):
         }, ensure_ascii=False)
         payload = {
             "model": target_model,
-            "messages": [{"role": "system", "content": system_message}, {"role": "user", "content": user_message}],
-            "format": "json", "stream": False, "keep_alive": "60m",
+            "messages": self.review_messages(system_message, user_message, 450, target_model),
+            "format": SEMANTIC_CRITIC_SCHEMA, "stream": False, "keep_alive": "60m",
             "options": self._options(target_model, 0.0, 450),
         }
         response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
@@ -498,10 +503,7 @@ class OllamaProvider(TranslationProvider):
         }, ensure_ascii=False)
         payload = {
             "model": target_model,
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message},
-            ],
+            "messages": self.review_messages(system_message, user_message, 900, target_model),
             "format": "json",
             "stream": False,
             "keep_alive": "60m",
@@ -548,15 +550,13 @@ class OllamaProvider(TranslationProvider):
             "PREVIOUS_BILINGUAL_CONTEXT": previous_context or [],
             "INSTRUCTION": "Edit the Vietnamese, not the meaning.",
         }, ensure_ascii=False)
+        output_cap = output_token_cap(source_text, current_translation)
         payload = {
             "model": target_model,
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message},
-            ],
+            "messages": self.review_messages(system_message, user_message, output_cap, target_model, preamble=EDIT_TASK_PREAMBLE),
             "stream": False,
             "keep_alive": "60m",
-            "options": self._options(target_model, 0.1, output_token_cap(source_text, current_translation)),
+            "options": self._options(target_model, 0.1, output_cap),
         }
         response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=60.0)
         if response.status_code != 200:
@@ -577,18 +577,16 @@ class OllamaProvider(TranslationProvider):
         model: Optional[str] = None,
     ) -> Dict[str, Any]:
         target_model = model or self.default_model
+        user_message = json.dumps({
+            "source": source_text,
+            "candidate_a": candidate_a,
+            "candidate_b": candidate_b,
+            "document_type": document_type,
+            "register": register,
+        }, ensure_ascii=False)
         payload = {
             "model": target_model,
-            "messages": [
-                {"role": "system", "content": PAIRWISE_NATURALNESS_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps({
-                    "source": source_text,
-                    "candidate_a": candidate_a,
-                    "candidate_b": candidate_b,
-                    "document_type": document_type,
-                    "register": register,
-                }, ensure_ascii=False)},
-            ],
+            "messages": self.review_messages(PAIRWISE_NATURALNESS_SYSTEM_PROMPT, user_message, 200, target_model),
             "format": "json",
             "stream": False,
             "keep_alive": "60m",

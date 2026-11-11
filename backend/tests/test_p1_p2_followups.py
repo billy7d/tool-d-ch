@@ -167,10 +167,10 @@ def test_missed_soft_term_becomes_lint_warning_but_not_on_headings(tmp_path, mon
     assert all(hint["rule"] != "SOFT_TERM_MISSED" for hint in S._hints_for_node(engine, ledger, heading, "Lệnh xây dựng"))
 
 
-def test_single_line_heading_keeps_only_first_line_of_batch_output(tmp_path, monkeypatch):
+def test_single_line_heading_keeps_only_first_line_of_output(tmp_path, monkeypatch):
     class _HeadingProvider(MockProvider):
-        def translate(self, blocks, system_prompt, user_prompt, model=None, temperature=0.2):
-            return [{"node_id": block["id"], "text": "Nhà\n\n“Anh về rồi,” Alice nói với Bob."} for block in blocks]
+        def translate_single(self, text, system_prompt, glossary_terms=None, model=None, temperature=0.15, user_prompt=None):
+            return "Nhà\n\n“Anh về rồi,” Alice nói với Bob."
 
     engine, chapter, node = _engine(tmp_path, monkeypatch, provider=_HeadingProvider(), document_type="LITERATURE", content="The House")
     from app.models.canonical import NodeType

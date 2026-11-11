@@ -66,13 +66,15 @@ def test_single_fallback_and_auto_healing_flow():
         ch = ChapterModel(id="ch_heal_1", project_id=project_id, number=1, title="Chapter 1", order_index=0)
         db.add(ch)
         
+        topics = ["compound interest", "investment", "cash flow", "opportunity cost"]
         for i in range(4):
             nm = NodeModel(
                 id=f"node_heal_{i}",
                 project_id=project_id,
                 chapter_id="ch_heal_1",
                 node_type="paragraph",
-                content=f"This is paragraph {i} discussing compound interest and investment cash flow.",
+                # Mỗi đoạn một nội dung: đoạn gần như trùng đoạn trước sẽ dính kiểm tra CONTEXT_LEAK.
+                content=f"Chapter part {i} covers {topics[i]} " + " ".join(["detail"] * (i + 1)) + f" with {i * 7 + 3} cases.",
                 order_index=i,
                 status="PENDING",
                 approval_status="UNAPPROVED",

@@ -13,6 +13,9 @@ class AppSettings(BaseModel):
     # TOOL_DICH_DATA_DIR cho phép test/benchmark dùng thư mục dữ liệu riêng, không làm bẩn data/ thật.
     DATA_DIR: Path = Path(os.environ.get("TOOL_DICH_DATA_DIR") or (BASE_DIR / "data"))
     PROJECTS_DIR: Path = DATA_DIR / "projects"
+    # Từ điển Anh–Việt tùy chọn (StarDict), dùng làm nghĩa tham khảo khi sửa từ model để sót. Không phụ thuộc
+    # TOOL_DICH_DATA_DIR vì đây là dữ liệu dùng chung, không phải dữ liệu của từng lần chạy.
+    DICTIONARY_DIR: Path = Path(os.environ.get("TOOL_DICH_DICTIONARY_DIR") or (BASE_DIR / "data" / "dictionaries" / "en-vi"))
     FONTS_DIR: Path = BASE_DIR / "fonts"
     LOGS_DIR: Path = BASE_DIR / "logs"
     STATIC_DIR: Path = BASE_DIR / "frontend" / "dist"

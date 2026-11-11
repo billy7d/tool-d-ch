@@ -21,10 +21,6 @@ from app.services.translation.node_policy import translatable_values
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.semantic_assurance import SemanticAssuranceService
 
-# Một lô hiếm khi quá 12 đoạn; chỉ dò TM trong khoảng này để không truy vấn cả chương mỗi vòng.
-TM_LOOKAHEAD_NODES = 16
-
-
 def has_no_words(text: str) -> bool:
     """Đoạn chỉ có số, ký hiệu, dấu câu ("***", "3.14", "[12]"): không có gì để dịch, giữ nguyên bản gốc."""
     return bool((text or "").strip()) and not any(char.isalpha() for char in text)
@@ -292,15 +288,14 @@ class TranslationWorker:
                         time.sleep(0.25)
                     if not stop_event.is_set():
                         break
-                    pending_models = db.query(NodeModel).filter(
+                    first_model = db.query(NodeModel).filter(
                         NodeModel.chapter_id == chapter.id,
                         NodeModel.node_type.in_(translatable_types),
                         NodeModel.status.in_(["PENDING", "FAILED"]),
-                    ).order_by(NodeModel.order_index).all()
-                    if not pending_models:
+                    ).order_by(NodeModel.order_index).first()
+                    if not first_model:
                         break
 
-                    first_model = pending_models[0]
                     if has_no_words(first_model.content):
                         semantic = SemanticAssuranceService.assure_and_commit(
                             engine, chapter, first_model, first_model.content, signature,
@@ -335,20 +330,10 @@ class TranslationWorker:
                                 })
                             continue
 
-                    canonical_nodes = [engine.canonical_node(node) for node in pending_models]
-                    # Đoạn lặp lại giữa lô (chú thích hình, câu định nghĩa...) đã có bản duyệt trong TM: cắt lô
-                    # ngay trước nó để vòng sau lấy từ TM thay vì gửi model dịch lại.
-                    for index, later in enumerate(pending_models[1:TM_LOOKAHEAD_NODES], start=1):
-                        if has_no_words(later.content) or TranslationMemoryService.lookup(
-                            db, later.content,
-                            style_hash=signature.style_hash,
-                            glossary_hash=signature.glossary_hash,
-                            prompt_version=signature.prompt_version,
-                            locked_glossary=locked_glossary,
-                        ):
-                            canonical_nodes = canonical_nodes[:index]
-                            break
-                    chunk = engine.pack_next_chunk(chapter, canonical_nodes)
+                    # Dịch từng đoạn: đo trên sách thật, lô JSON nhiều đoạn chạm trần context 4K, 4/6 lô mất đoạn
+                    # hoặc lẫn nội dung sang đoạn khác rồi vẫn phải dịch lại từng đoạn. Từng đoạn còn dùng được
+                    # ngay bản đã duyệt của đoạn liền trước làm ngữ cảnh.
+                    chunk = engine.pack_next_chunk(chapter, [engine.canonical_node(first_model)])
                     if not chunk:
                         break
                     self.broadcast_event("TRANSLATION_CHUNK_STARTED", {

@@ -12,7 +12,8 @@ from app.services.translation.semantic_risk import SEMANTIC_POLICY_VERSION, Sema
 
 # v2: chuẩn hóa JSON lệch schema (description/true/"Partial") trước khi kiểm tra strict.
 # v3: lời critic ngắn, trích cụm tiếng Anh để bác được lời "thêm ý" sai.
-SEMANTIC_CRITIC_PROMPT_VERSION = "semantic-critic-v3"
+# v4: ép JSON schema và dùng chung phần đầu prompt với lượt dịch.
+SEMANTIC_CRITIC_PROMPT_VERSION = "semantic-critic-v4"
 _CHECKS = {"completeness", "meaning", "polarity", "modality", "causality", "scope", "entity_reference"}
 
 

@@ -46,6 +46,13 @@ CONTEXT_TRIM_ORDER: Tuple[str, ...] = (
     "few_shot_drop_emergency",
 )
 
+CONTEXT_PRIORITY_NOTE = (
+    "CONTEXT PRIORITY\n"
+    "For the current source, protect the semantic contract and source first; then use HARD terms/entities, "
+    "the immediate approved bilingual context, retrieved user style, curated examples, chapter memory and "
+    "distant document observations in that order. Context is guidance only and never changes source facts."
+)
+
 
 @dataclass(frozen=True)
 class ContextTokenBudget:
@@ -130,6 +137,24 @@ class TranslationContext:
     @property
     def fits(self) -> bool:
         return bool(self.token_budget and self.token_budget.fits)
+
+    @property
+    def stable_system_prompt(self) -> str:
+        """System prompt kèm phần ngữ cảnh không đổi giữa các đoạn trong cùng một chương.
+
+        Ollama không đọc lại phần đầu prompt trùng với lần gọi trước: đo trên GTX 1660 Super, 2.000 token
+        mất 0,7 giây khi trùng và ~14 giây khi không. Vì vậy mọi thứ ổn định phải nằm ở đầu, trước nguồn.
+        """
+        parts = [self.system_prompt, CONTEXT_PRIORITY_NOTE]
+        if self.document_memory:
+            parts.append(
+                "SOURCE DOCUMENT CHARACTERISTICS - DESCRIPTIVE ONLY\n"
+                "These observations describe the source. They must not override TARGET register, sentence style, "
+                "translation mode, locked glossary or user instructions.\n" + self.document_memory
+            )
+        if self.chapter_memory:
+            parts.append("CHAPTER MEMORY\n" + self.chapter_memory)
+        return "\n\n".join(part for part in parts if part)
 
     def assert_within_budget(self) -> None:
         if not self.token_budget:
@@ -218,7 +243,7 @@ class ContextAssembler:
         source_text = "\n".join(str(getattr(node, "content", "") or "") for node in nodes)
         source_payload = cls._source_payload(nodes, prompt_kind)
         document_memory = json.dumps(document_profile.to_source_context(), ensure_ascii=False, separators=(",", ":"))
-        chapter_text = json.dumps(chapter_memory.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        chapter_text = json.dumps(chapter_memory.to_prompt_dict(), ensure_ascii=False, separators=(",", ":"))
         relevant_glossary = cls.filter_relevant_glossary(source_text, glossary)
         relevant_soft_glossary = cls.filter_relevant_glossary(source_text, soft_glossary or {})
         relevant_glossary_details: List[dict] = []

@@ -9,7 +9,7 @@ def test_natural_prompt_prioritizes_meaning_over_english_form():
         translation_mode=TranslationMode.NATURAL,
     )
 
-    assert PROMPT_VERSION == "translation-v3.6-compact-prompt"
+    assert PROMPT_VERSION == "translation-v3.7-stable-prefix"
     assert "Preserve meaning, not English wording or grammar" in prompt
     for anti_pattern in (
         "word-for-word translation",

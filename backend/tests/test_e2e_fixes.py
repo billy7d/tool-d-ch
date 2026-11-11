@@ -273,7 +273,7 @@ def test_reversed_roles_are_fixed_without_extra_model_calls(tmp_path, monkeypatc
 def test_english_residue_uses_short_vietnamese_recovery_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "PROJECTS_DIR", tmp_path)
     leftover = "Từ khi mẹ anh qua đời năm 2019, nobody chạm vào piano nữa."
-    provider = _ScriptedSingle([leftover, leftover, leftover, "Từ khi mẹ anh qua đời năm 2019, không ai chạm vào cây đàn piano nữa."])
+    provider = _ScriptedSingle([leftover, leftover, "Từ khi mẹ anh qua đời năm 2019, không ai chạm vào cây đàn piano nữa."])
     engine, chapter, node = _engine_for(provider, "Nobody had touched the piano since his mother died in 2019.")
     result = engine.translate_batch(chapter, [node]).results[0]
     assert result.passed and "không ai" in result.translated_text

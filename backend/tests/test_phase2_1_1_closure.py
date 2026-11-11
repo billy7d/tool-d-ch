@@ -198,7 +198,7 @@ def test_translation_config_remains_target_style_authority():
         system_prompt=PromptBuilder.build_system_prompt(config),
         output_contract=PromptBuilder.BATCH_OUTPUT_CONTRACT,
     )
-    contract = context.system_prompt + "\n" + PromptBuilder.build_batch_prompt([node], context)
+    contract = context.stable_system_prompt + "\n" + PromptBuilder.build_batch_prompt([node], context)
     assert '"source_register":"formal"' in contract
     assert "Register: CONVERSATIONAL" in contract
     assert "Sentence restructuring: FREE" in contract

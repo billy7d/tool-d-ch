@@ -119,3 +119,184 @@ def test_vietnamese_names_loanwords_and_kept_terms_are_not_flagged():
     ]:
         assert _non_vietnamese_words(source, text) == [], text
     assert _non_vietnamese_words("Use the framework.", "Dùng framework này.", {"framework": "framework"}) == []
+
+
+# ---------- Dịch từng đoạn với phần đầu prompt ổn định ----------
+
+def _stable_context(document="document observations", chapter="chapter observations"):
+    from app.services.translation.context_assembler import TranslationContext
+
+    return TranslationContext(system_prompt="system rules", document_memory=document, chapter_memory=chapter)
+
+
+def test_stable_prompt_is_identical_between_paragraphs_and_user_prompt_holds_only_what_changes():
+    from app.models.canonical import DocumentNode, NodeStatus, NodeType
+    from app.services.translation.context_memory import BilingualContextItem
+
+    first = _stable_context()
+    second = _stable_context()
+    second.previous_context = [BilingualContextItem("n1", "The board met.", "Hội đồng đã họp.")]
+    assert first.stable_system_prompt == second.stable_system_prompt
+
+    node = DocumentNode(id="n2", type=NodeType.PARAGRAPH, content="The plan passed.", status=NodeStatus.PENDING, order_index=2)
+    user_prompt = PromptBuilder.build_single_prompt(node, second, "Chapter 1")
+    assert "The plan passed." in user_prompt and "Hội đồng đã họp." in user_prompt
+    for stable_text in ("document observations", "chapter observations", "CONTEXT PRIORITY"):
+        assert stable_text not in user_prompt
+
+
+def _capture_ollama_payloads(monkeypatch):
+    import json as json_module
+
+    import requests
+
+    sent = []
+
+    def fake_post(self, url, data=None, json=None, **kwargs):
+        sent.append(json)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json_module.dumps({"message": {"content": "{}"}}).encode()
+        return response
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    return sent
+
+
+def test_critic_reuses_translation_prefix_and_forces_schema(monkeypatch):
+    from app.services.translation.provider_base import REVIEW_TASK_PREAMBLE, SEMANTIC_CRITIC_SCHEMA
+
+    sent = _capture_ollama_payloads(monkeypatch)
+    provider = OllamaProvider()
+    provider.remember_prompt_prefix("SHARED TRANSLATION PREFIX")
+    provider.review_semantic_fidelity("Source.", "Bản dịch.", {}, {}, "GENERAL", model="qwen2.5:7b")
+
+    messages = sent[0]["messages"]
+    assert messages[0] == {"role": "system", "content": "SHARED TRANSLATION PREFIX"}
+    assert messages[1]["content"].startswith(REVIEW_TASK_PREAMBLE)
+    assert "semantic fidelity critic" in messages[1]["content"]
+    assert sent[0]["format"] == SEMANTIC_CRITIC_SCHEMA
+    # Thứ tự quyết định chất lượng: đặt errors trước status thì qwen2.5:7b chấm FAIL 32/32 lượt.
+    assert list(SEMANTIC_CRITIC_SCHEMA["properties"])[:2] == ["status", "score"]
+    assert set(SEMANTIC_CRITIC_SCHEMA["required"]) >= {"status", "checks", "errors"}
+
+
+def test_critic_keeps_its_own_prompt_when_shared_prefix_would_overflow_context(monkeypatch):
+    sent = _capture_ollama_payloads(monkeypatch)
+    provider = OllamaProvider()
+    provider.configure_context_window(4096)
+    provider.remember_prompt_prefix("x" * 12000)
+    provider.review_semantic_fidelity("Source.", "Bản dịch.", {}, {}, "GENERAL", model="qwen2.5:7b")
+    assert "semantic fidelity critic" in sent[0]["messages"][0]["content"]
+
+
+def test_rolling_context_always_keeps_the_paragraph_right_before_the_current_one():
+    from types import SimpleNamespace
+
+    from app.services.translation.context_memory import RollingContextService
+
+    def row(index, words):
+        return SimpleNamespace(id=f"n{index}", order_index=index, content="word " * words, translated_content="từ " * words)
+
+    rows = [row(1, 200), row(2, 200), row(3, 200), row(4, 30)]
+    kept = RollingContextService._bounded(rows, 4, 700)
+    assert kept[-1].node_id == "n4"
+    assert [item.node_id for item in kept] == sorted(item.node_id for item in kept)
+
+
+def test_long_previous_paragraph_keeps_only_its_ending_from_a_sentence_start():
+    from types import SimpleNamespace
+
+    from app.services.translation.context_memory import ROLLING_ITEM_MAX_CHARS, RollingContextService
+
+    source = " ".join(f"Sentence number {index} of the long paragraph." for index in range(80))
+    translation = " ".join(f"Câu thứ {index} của đoạn văn dài." for index in range(80))
+    row = SimpleNamespace(id="n1", order_index=1, content=source, translated_content=translation)
+    item = RollingContextService._bounded([row], 4, 400)[0]
+    assert len(item.source) <= ROLLING_ITEM_MAX_CHARS and len(item.translation) <= ROLLING_ITEM_MAX_CHARS
+    assert item.source.startswith("Sentence number") and item.source.endswith("number 79 of the long paragraph.")
+    assert item.translation.startswith("Câu thứ") and item.translation.endswith("Câu thứ 79 của đoạn văn dài.")
+    short = SimpleNamespace(id="n2", order_index=2, content="Short.", translated_content="Ngắn.")
+    kept = RollingContextService._bounded([short], 4, 400)[0]
+    assert (kept.source, kept.translation) == ("Short.", "Ngắn.")
+
+
+def test_chapter_memory_prompt_has_no_cache_metadata():
+    from app.services.translation.context_memory import ChapterMemory
+
+    memory = ChapterMemory(summary="Tóm tắt.", source_hash="a" * 64, glossary_hash="b" * 64, generated_at="2026-01-01")
+    assert memory.to_prompt_dict() == {"summary": "Tóm tắt."}
+
+
+def test_chapter_memory_accepts_object_notes_and_drops_chinese_items():
+    from app.services.translation.context_memory import validate_chapter_memory_response
+
+    value = validate_chapter_memory_response({
+        "summary": "Chương nói về tình yêu.", "tone": "suy tư", "key_concepts": [], "important_facts": [], "style_notes": [],
+        "entities": [{"source": "Jung", "preferred": "Jung"}],
+        "pronoun_notes": [{"source": "I", "preferred": "tôi"}],
+        "terminology": [{"source": "postulation", "preferred": "tạo hóa一神"}, {"source": "ego", "preferred": "bản ngã"}],
+    })
+    assert value["pronoun_notes"] == ["I -> tôi"]
+    assert value["terminology"] == [{"source": "ego", "preferred": "bản ngã"}]
+
+
+def test_fallback_chapter_entities_skip_function_words_and_do_not_span_lines():
+    from app.services.translation.context_memory import ChapterMemoryBuilder
+
+    names = [item["source"] for item in ChapterMemoryBuilder._entities(
+        "But the theory held. And C. G. Jung wrote it.\n\nThe Prophet\n\nGive your hearts. Aniela Jaffe edited it.", {},
+    )]
+    assert "But" not in names and "And" not in names and "Give" not in names
+    assert "Aniela Jaffe" in names
+    assert not any("\n" in name for name in names)
+
+
+def test_english_fused_onto_a_vietnamese_word_is_residue():
+    from app.services.translation.quality_gate import _non_vietnamese_words
+
+    source = "The unconscious part of the mind and the evolution of consciousness."
+    assert _non_vietnamese_words(source, "Phần khôngscious của tâm trí và Sự Phát Triển Củasciousness.") == [
+        "khôngscious", "Củasciousness",
+    ]
+    assert _non_vietnamese_words(source, "Nghiêng ngả, khuya khoắt, huyền thoại, thuyết phục, Mátxcơva.") == []
+    assert _non_vietnamese_words("A poem by Éluard.", "Một bài thơ của Éluard.") == []
+
+
+def test_word_defined_by_the_source_itself_is_not_residue():
+    from app.services.translation.quality_gate import _non_vietnamese_words
+
+    source = "The word comes from the Latin prefix con, meaning “with,” and scire, meaning “to know.”"
+    assert _non_vietnamese_words(source, "Từ này gốc Latinh từ con, nghĩa là “với”, và scire, nghĩa là “biết”.") == []
+    assert _non_vietnamese_words(source, "Từ này gốc Latinh và prefix có nghĩa là “với”.") == ["prefix"]
+
+
+def test_citation_kept_as_is_is_not_wrong_language_but_untranslated_prose_still_is():
+    from app.services.translation.language_validator import validate_target_language
+
+    citation = "* C. G. Jung, Memories, Dreams, Reflections, Aniela Jaffe, ed. (New York: Vintage Books, 1965), p. 4."
+    assert validate_target_language(citation, citation.replace("p. 4", "tr. 4")).passed
+    prose = "The patient told me about her family and about the problem with her time every single week."
+    assert not validate_target_language(prose, prose).passed
+
+
+def test_repeated_short_sentence_is_not_a_leak_unless_the_translation_grew():
+    from app.services.translation.quality_gate import TranslationQualityGate
+
+    previous = ["Tôi đồng ý với bạn. Bạn thực sự có vấn đề về thời gian."]
+    author_repeats = TranslationQualityGate().validate(
+        "I agree with you. You do have a problem with time. Listen to me.",
+        "Tôi đồng ý với bạn. Bạn thực sự có vấn đề về thời gian. Hãy nghe tôi.",
+        {}, previous,
+    )
+    assert not any(issue["code"] == "CONTEXT_LEAK" for issue in author_repeats.issues)
+    model_copied = TranslationQualityGate().validate(
+        "Do about what?", "Bạn thực sự có vấn đề về thời gian. Về chuyện gì cơ?", {}, previous,
+    )
+    assert any(issue["code"] == "CONTEXT_LEAK" for issue in model_copied.issues)
+
+
+def test_document_summary_is_requested_in_english(monkeypatch):
+    sent = _capture_ollama_payloads(monkeypatch)
+    OllamaProvider().summarize_context("Some text.", model="qwen2.5:7b")
+    assert "(in English)" in sent[0]["messages"][0]["content"]

@@ -1,10 +1,12 @@
 import json
 import re
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from app.models.canonical import DocumentNode, TranslationMode
 from app.services.translation.context_assembler import TranslationContext
+from app.services.translation.language_validator import is_citation
 from app.services.translation.prompt_profiles import STYLE_PACK_VERSION, get_style_pack, select_few_shots
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.translation_signature import PROMPT_VERSION
@@ -150,16 +152,13 @@ class PromptBuilder:
     @classmethod
     def _context_parts(cls, context: Optional[TranslationContext], chapter_title: str = "") -> List[str]:
         parts: List[str] = []
+        # Tên chương đứng đầu, xa nguồn: đứng ngay trên nguồn thì heading "The Baby and the Bathwater"
+        # bị dịch thành "Giới thiệu" theo tên chương "Introduction".
+        if chapter_title:
+            parts.append("CURRENT CHAPTER\n" + chapter_title)
         if not context:
-            if chapter_title:
-                parts.append("CURRENT CHAPTER\n" + chapter_title)
             return parts
-        parts.append(
-            "CONTEXT PRIORITY\n"
-            "For the current source, protect the semantic contract and source first; then use HARD terms/entities, "
-            "the immediate approved bilingual context, retrieved user style, curated examples, chapter memory and "
-            "distant document observations in that order. Context is guidance only and never changes source facts."
-        )
+        # Thứ tự ưu tiên, document memory và chapter memory nằm ở TranslationContext.stable_system_prompt.
         if context.glossary:
             hard_entries = context.glossary_details or [
                 {"source_term": source, "preferred_target": target, "allowed_variants": []}
@@ -237,16 +236,6 @@ class PromptBuilder:
                 f"Source: {item.get('source', '')}\nNatural Vietnamese: {item.get('target', '')}"
                 for item in context.few_shots
             ))
-        if context.document_memory:
-            parts.append(
-                "SOURCE DOCUMENT CHARACTERISTICS - DESCRIPTIVE ONLY\n"
-                "These observations describe the source. They must not override TARGET register, sentence style, "
-                "translation mode, locked glossary or user instructions.\n" + context.document_memory
-            )
-        if chapter_title:
-            parts.append("CURRENT CHAPTER\n" + chapter_title)
-        if context.chapter_memory:
-            parts.append("CHAPTER MEMORY\n" + context.chapter_memory)
         return parts
 
     @staticmethod
@@ -278,8 +267,18 @@ class PromptBuilder:
 
     @classmethod
     def build_single_prompt(cls, node: DocumentNode, context: TranslationContext, chapter_title: str = "") -> str:
-        parts = ["CURRENT SOURCE\n" + node.content]
-        parts.extend(cls._context_parts(context, chapter_title))
+        # Nguồn đứng cuối, sát lời yêu cầu: trên 40 đoạn sách thật, để nguồn đứng đầu làm model dịch luôn cả
+        # ngữ cảnh phía sau (CONTEXT_LEAK 6 so với 1, đạt gate 23/40 so với 30/40).
+        node_type = getattr(node, "type", "")
+        if str(getattr(node_type, "value", node_type)).startswith("heading") and not is_citation(node.content or ""):
+            # Trên 64 tiêu đề thật, câu yêu cầu tiếng Việt và không kèm ví dụ cho kết quả đúng hơn hẳn prompt
+            # tiếng Anh ("Trường hợp của Kathy" so với "Thủ Thiện Của Kathy"). Dòng trích dẫn bị PDF gắn nhãn
+            # heading thì vẫn dịch như đoạn thường.
+            parts = cls._context_parts(replace(context, few_shots=[], style_memory_examples=[]) if context else None)
+            parts.append(f"Dịch tiêu đề sau sang tiếng Việt. Chỉ trả về tiêu đề đã dịch, không giải thích:\n{node.content}")
+            return "\n\n".join(parts)
+        parts = cls._context_parts(context, chapter_title)
+        parts.append("CURRENT SOURCE\n" + node.content)
         parts.append("Translate CURRENT SOURCE completely.\n" + cls.SINGLE_OUTPUT_CONTRACT)
         return "\n\n".join(parts)
 
@@ -309,9 +308,9 @@ class PromptBuilder:
         segment_index: int = 1,
         segment_count: int = 1,
     ) -> str:
-        parts = ["CURRENT SEGMENT\n" + segment_text]
-        parts.extend(cls._context_parts(context, chapter_title))
-        parts.insert(1, f"SEGMENT {segment_index}/{segment_count}")
+        parts = cls._context_parts(context, chapter_title)
+        parts.append(f"SEGMENT {segment_index}/{segment_count}")
+        parts.append("CURRENT SEGMENT\n" + segment_text)
         parts.append(cls.SEGMENT_OUTPUT_CONTRACT)
         return "\n\n".join(parts)
 

@@ -22,11 +22,18 @@ from app.services.translation.node_policy import normalize_node_type
 from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.prompt_profiles import select_few_shots
 from app.services.translation.provider_base import TranslationProvider
-from app.services.translation.quality_gate import QualityGateResult, TranslationQualityGate
+from app.services.translation.quality_gate import (
+    SENTENCE_SPLIT,
+    QualityGateResult,
+    TranslationQualityGate,
+    _english_residue,
+    _non_vietnamese_words,
+)
 from app.services.translation.style_memory import StyleMemoryService
 from app.services.translation.style_rules import StyleRuleService
 from app.services.translation.translation_config import TranslationConfig
 from app.services.translation.vietnamese_post_processor import VietnamesePostProcessor
+from app.services.translation.vocabulary_hints import VocabularyHints, format_hints
 
 
 @dataclass
@@ -63,6 +70,8 @@ class EngineNodeResult:
     attempts: int = 1
     error: str = ""
     telemetry: EngineTelemetry = field(default_factory=EngineTelemetry)
+    # Cùng một từ tiếng Anh vẫn còn sau lượt dịch lại: model không biết từ đó, thử tiếp chỉ tốn thời gian.
+    stubborn_residue: bool = False
 
 
 @dataclass
@@ -215,12 +224,14 @@ class ContextualTranslationEngine:
 
     def _rolling_context(self, chapter: ChapterModel, nodes: List[DocumentNode], neighbors: bool) -> List[Any]:
         first = min(nodes, key=lambda item: item.order_index)
+        if len(nodes) == 1 and str(getattr(first.type, "value", first.type)).startswith("heading"):
+            # Đoạn trước làm model viết thành câu thay vì dịch tiêu đề ("The Baby and the Bathwater" thành cả
+            # một câu về giữ điều tốt), rồi tiêu đề sai lại lan sang đoạn sau qua ngữ cảnh.
+            return []
         if neighbors:
             db_node = self.db.query(NodeModel).filter(NodeModel.id == first.id).first()
             return RollingContextService.get_neighbors(self.db, db_node) if db_node else []
-        return RollingContextService.get_previous(
-            self.db, chapter.id, first.order_index, max_nodes=4, max_tokens=700,
-        )
+        return RollingContextService.get_previous(self.db, chapter.id, first.order_index, max_nodes=4)
 
     def address_terms_for(self, source_text: str) -> AddressTermLedger:
         ledger = getattr(self, "address_ledger", None) or AddressTermLedger.from_style_guide(
@@ -312,6 +323,7 @@ class ContextualTranslationEngine:
                 "total_tokens": context.token_budget.total_estimated_tokens,
                 "context_limit": context.token_budget.model_context_limit,
             })
+        self.provider.remember_prompt_prefix(context.stable_system_prompt)
         return context
 
     @staticmethod
@@ -342,7 +354,7 @@ class ContextualTranslationEngine:
     def _actual_request_tokens(context: TranslationContext, user_prompt: str) -> int:
         budget = context.token_budget
         return (
-            estimate_tokens(context.system_prompt)
+            estimate_tokens(context.stable_system_prompt)
             + estimate_tokens(user_prompt)
             + budget.reserved_output_tokens
             + budget.safety_margin_tokens
@@ -396,6 +408,11 @@ class ContextualTranslationEngine:
         return EngineNodeResult(node.id, "", failed_gate, False, error=message, telemetry=telemetry or EngineTelemetry())
 
     def translate_batch(self, chapter: ChapterModel, nodes: List[DocumentNode]) -> EngineBatchResult:
+        if len(nodes) == 1:
+            # Một đoạn thì dịch dạng văn bản thuần, không qua JSON: JSON tốn thêm token, làm đoạn thoại có
+            # ngoặc kép bị escape sai, và model hay trả lệch schema khiến phải dịch lại.
+            result = self.translate_node(chapter, nodes[0])
+            return EngineBatchResult([result], telemetry=result.telemetry)
         context = self.assemble_context(chapter, nodes, "batch")
         if not context.fits:
             if len(nodes) == 1:
@@ -419,7 +436,7 @@ class ContextualTranslationEngine:
             telemetry.provider_calls += 1
             raw = self.provider.translate(
                 blocks=[{"id": node.id, "text": node.content} for node in nodes],
-                system_prompt=context.system_prompt,
+                system_prompt=context.stable_system_prompt,
                 user_prompt=user_prompt,
                 model=self.config.model_name,
                 temperature=0.2,
@@ -465,18 +482,21 @@ class ContextualTranslationEngine:
         try:
             telemetry.provider_calls += 1
             candidate = self._translate_single_with_contract(
-                node.content, context.system_prompt, context.glossary, 0.15, prompt,
+                node.content, context.stable_system_prompt, context.glossary, 0.15, prompt,
             )
         except Exception as exc:
             return self._empty_failure(node, "TRANSLATION_PROVIDER_ERROR", str(exc), telemetry)
         telemetry.latency_ms = (time.perf_counter() - started) * 1000
-        candidate, gate = self._finalize_candidate(node, candidate, self._context_translations(context))
+        candidate, gate, patched = self._finalize_with_patch(node, candidate, self._context_translations(context))
         if gate.passed or max_attempts <= 1:
-            return EngineNodeResult(node.id, candidate, gate, gate.passed, telemetry=telemetry)
+            # Câu đã sửa được tính là một lượt sửa nên chấm rủi ro cao hơn, dễ được critic kiểm tra lại.
+            return EngineNodeResult(node.id, candidate, gate, gate.passed, attempts=2 if patched else 1, telemetry=telemetry)
+        if self._has_stubborn_residue(node, candidate, gate):
+            return EngineNodeResult(node.id, candidate, gate, False, attempts=2, telemetry=telemetry, stubborn_residue=True)
         repaired = self.repair_node(chapter, node, gate.issues, max_attempts=max_attempts - 1)
         repaired.telemetry.provider_calls += telemetry.provider_calls
         repaired.telemetry.latency_ms += telemetry.latency_ms
-        if not repaired.passed and self._has_foreign_script(repaired.quality.issues):
+        if not repaired.passed and not repaired.stubborn_residue and self._has_foreign_script(repaired.quality.issues):
             return self._recover_foreign_script(node, repaired, context)
         return repaired
 
@@ -519,6 +539,8 @@ class ContextualTranslationEngine:
         if fixed:
             text = fixed
         gate = self._validate_candidate(node.content, text, previous)
+        if self._has_foreign_script(gate.issues) and self.CJK_RUN.search(text):
+            text, gate = self._replace_foreign_fragments(node, text, gate, previous)
         if node_type.startswith("heading") and text:
             duplicate = self._duplicated_heading(node, text)
             if duplicate:
@@ -526,6 +548,162 @@ class ContextualTranslationEngine:
                     "code": "HEADING_DUPLICATE", "severity": "ERROR",
                     "message": f'Heading "{node.content}" bị dịch trùng với heading khác "{duplicate}".',
                 }])
+        return text, gate
+
+    FOREIGN_FRAGMENT_MAX_RUNS = 6
+    FOREIGN_FRAGMENT_MAX_SHARE = 0.2
+
+    def _replace_foreign_fragments(
+        self, node: DocumentNode, text: str, gate: QualityGateResult, previous: Optional[List[str]] = None,
+    ):
+        """qwen2.5 hay chen vài chữ Hán giữa bản dịch đúng ("成千上万的"): chỉ dịch đúng các cụm đó.
+
+        Bản dịch đã có đủ ngữ cảnh và xưng hô nên giữ lại tốt hơn dịch lại bằng prompt ngắn, và chỉ tốn
+        khoảng 1 giây so với 20-30 giây. Lẫn quá nhiều (model đã chuyển hẳn sang tiếng Trung) thì để đường
+        dịch lại xử lý: dịch lại từ bản tiếng Trung có thể mất ý so với nguồn.
+        """
+        source = node.content or ""
+        runs = [match for match in self.CJK_RUN.finditer(text) if match.group(0) not in source]
+        foreign_chars = sum(len(match.group(0)) for match in runs)
+        if (
+            not runs or len(runs) > self.FOREIGN_FRAGMENT_MAX_RUNS
+            or foreign_chars > self.FOREIGN_FRAGMENT_MAX_SHARE * len("".join(text.split()))
+        ):
+            return text, gate
+        self._emit("TRANSLATION_FOREIGN_SCRIPT_RECOVERY", {"node_id": node.id, "step": "fragments"})
+        pieces = []
+        cursor = 0
+        answers: Dict[str, str] = {}
+        for match in runs:
+            pieces.append(text[cursor:match.start()])
+            fragment = match.group(0)
+            if fragment not in answers:
+                try:
+                    answers[fragment] = self._translate_single_with_contract(
+                        fragment,
+                        self.FOREIGN_SCRIPT_SYSTEM_PROMPT,
+                        {},
+                        0.0,
+                        f"Câu tiếng Anh gốc để tham khảo nghĩa:\n{source}\n\n"
+                        f"Dịch cụm tiếng Trung sau sang tiếng Việt, chỉ trả về cụm đã dịch:\n{fragment}",
+                    ).strip()
+                except Exception:
+                    answers[fragment] = fragment
+                if self.CJK_RUN.search(answers[fragment]):
+                    # Model trả lời lại bằng tiếng Trung thì các cụm còn lại cũng vậy: chạy thật tốn thêm ~6 giây mỗi cụm.
+                    return text, gate
+            pieces.append(answers[fragment])
+            cursor = match.end()
+        pieces.append(text[cursor:])
+        replaced = VietnamesePostProcessor.normalize_safely(
+            VietnamesePostProcessor.normalize_cjk_punctuation(" ".join(part.strip() for part in pieces if part.strip()))
+        )
+        return replaced, self._validate_candidate(source, replaced, previous)
+
+    def _residue_words(self, node: DocumentNode, text: str) -> set:
+        """Chỉ từ nội dung: hư từ như "nobody" thì model biết nghĩa và prompt ngắn vẫn sửa được."""
+        return set(_non_vietnamese_words(node.content, text, self.glossary_validation_terms)) if text else set()
+
+    @staticmethod
+    def _only_residue_errors(issues: List[Dict[str, Any]]) -> bool:
+        errors = [issue for issue in issues if issue.get("severity") == "ERROR"]
+        return bool(errors) and all(issue.get("code") == "ENGLISH_RESIDUE" for issue in errors)
+
+    def _has_stubborn_residue(self, node: DocumentNode, text: str, gate: QualityGateResult) -> bool:
+        """Còn từ nội dung sau khi đã sửa câu: lượt dịch lại cả đoạn (~10 giây) chỉ cứu được 1/8 ca và hay chép lại
+        đúng từ đó, chuỗi khôi phục cứu 1/11. Để người duyệt xử lý với bản nháp đã lưu."""
+        return self._only_residue_errors(gate.issues) and bool(self._residue_words(node, text))
+
+    def _finalize_with_patch(self, node: DocumentNode, candidate: str, previous: Optional[List[str]] = None):
+        text, gate = self._finalize_candidate(node, candidate, previous)
+        if not self._has_stubborn_residue(node, text, gate):
+            return text, gate, False
+        patched_text, patched_gate = self._patch_residue_sentences(node, text, gate, previous)
+        return patched_text, patched_gate, patched_text != text
+
+    RESIDUE_PATCH_MAX_WORDS = 6
+    RESIDUE_PATCH_MAX_SENTENCES = 5
+    SENTENCE_WITH_SEPARATOR = re.compile(r"((?<=[.!?…])\s+|\n+)")
+
+    @staticmethod
+    def _dictionary_hints(words: List[str], source: str) -> str:
+        """Thiếu hoặc hỏng từ điển thì sửa câu như bình thường, không để việc tra nghĩa làm hỏng lượt dịch."""
+        try:
+            return format_hints(VocabularyHints().for_words(words, source))
+        except Exception:
+            return ""
+
+    def _sentence_residue(self, node: DocumentNode, sentence: str) -> set:
+        return set(_english_residue(sentence)) | set(_non_vietnamese_words(node.content, sentence, self.glossary_validation_terms))
+
+    def _patch_sentence(self, node: DocumentNode, sentence: str, words: List[str], system_prompt: str, hints: str) -> str:
+        prompt = (
+            f"Câu tiếng Việt dưới đây còn sót từ chưa dịch: {', '.join(words)}.\n"
+            + (f"Nghĩa tham khảo từ từ điển (chọn một nghĩa hợp với câu gốc):\n{hints}\n" if hints else "")
+            + f"Đoạn tiếng Anh gốc để tham khảo nghĩa:\n{(node.content or '')[:1500]}\n\n"
+            f"Câu cần sửa:\n{sentence}\n\n"
+            "Viết lại đúng câu đó: thay các từ chưa dịch bằng tiếng Việt đúng nghĩa (chỉ giữ nguyên tên riêng), "
+            "giữ nguyên mọi phần còn lại. Chỉ trả về câu đã sửa."
+        )
+        patched = self._translate_single_with_contract(sentence, system_prompt, {}, 0.0, prompt)
+        patched = VietnamesePostProcessor.normalize_safely(patched or "").strip()
+        if "**" not in sentence:
+            # Model hay in đậm chỗ vừa thay ("**không bao giờ**"); bản dịch sách không có markdown.
+            patched = patched.replace("**", "")
+        # Thêm câu hoặc dài hẳn ra nghĩa là model đã chép cả đoạn sau vào chứ không chỉ sửa câu này.
+        same_shape = len(SENTENCE_SPLIT.split(patched)) <= len(SENTENCE_SPLIT.split(sentence))
+        if patched and same_shape and len(patched) <= len(sentence) * 1.6 + 40:
+            return patched
+        return sentence
+
+    def _patch_residue_sentences(
+        self, node: DocumentNode, text: str, gate: QualityGateResult, previous: Optional[List[str]] = None,
+    ):
+        """Bản dịch chỉ sót vài từ thì nhờ model thay đúng các từ đó trong câu chứa chúng.
+
+        Trên 41 câu sách thật, prompt này sửa sạch 15 câu với kết quả đúng ("overtime" -> "thêm giờ"), hỏng
+        thì chỉ chép lại câu nên vô hại. Không dùng prompt cấm từ: đạt 33/41 nhưng model bỏ luôn từ đó, làm mất
+        ý một cách âm thầm. Cũng không hỏi nghĩa từng từ rồi tự thay: model cho "strong" -> "dịu dàng". Từ nào model
+        tự sửa không được thì thử lại một lần với nghĩa từ điển trong prompt ("rhizome" -> "thân rễ").
+        """
+        residue = _english_residue(text) + _non_vietnamese_words(node.content, text, self.glossary_validation_terms)
+        words = sorted(set(residue))
+        if not words or len(words) > self.RESIDUE_PATCH_MAX_WORDS:
+            return text, gate
+        pattern = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(word) for word in words) + r")(?!\w)")
+        pieces = self.SENTENCE_WITH_SEPARATOR.split(text)
+        targets = [index for index, piece in enumerate(pieces) if pattern.search(piece)]
+        if not targets or len(targets) > self.RESIDUE_PATCH_MAX_SENTENCES:
+            return text, gate
+        self._emit("TRANSLATION_RESIDUE_PATCH", {"node_id": node.id, "words": words})
+        system_prompt = getattr(self.provider, "_prompt_prefix", "") or self.system_prompt
+        for index in targets:
+            sentence = pieces[index]
+            found_words = sorted(set(pattern.findall(sentence)))
+            try:
+                # Chữ dính là mảnh từ model viết dở: tự sửa thì đoán ("khôngconscious" -> "không thức tỉnh"), có nghĩa
+                # của từ gốc trong nguồn thì ra "tiềm thức". Nên chữ dính có gợi ý ngay từ lượt đầu.
+                first_hints = self._dictionary_hints([word for word in found_words if not word.isascii()], node.content or "")
+                patched = self._patch_sentence(node, sentence, found_words, system_prompt, first_hints)
+                left = self._sentence_residue(node, patched)
+                # Từ ASCII thì từ điển chỉ dùng khi model tự sửa không được. Với từ thông dụng, nghĩa đầu của từ điển hay là
+                # nghĩa cổ và kéo model sai ("nervously" -> "có dũng khí", tự sửa thì ra "ngượng ngùng"); từ hiếm như
+                # "rhizome", "meningococcus" thì không có gợi ý model gần như luôn chép lại nguyên từ.
+                if left:
+                    # Thử lại từ câu gốc, không từ bản đã méo ("passively" -> "passivamente"); gợi ý chỉ cho từ còn sót.
+                    remaining = [word for word in found_words if re.search(rf"(?<!\w){re.escape(word)}(?!\w)", patched)]
+                    hints = self._dictionary_hints(remaining or found_words, node.content or "")
+                    if hints and hints != first_hints:
+                        retry = self._patch_sentence(node, sentence, found_words, system_prompt, hints)
+                        if len(self._sentence_residue(node, retry)) < len(left):
+                            patched = retry
+                pieces[index] = patched
+            except Exception:
+                return text, gate
+        patched_text = "".join(pieces)
+        patched_gate = self._validate_candidate(node.content, patched_text, previous)
+        if patched_gate.passed or len(patched_gate.issues) < len(gate.issues):
+            return patched_text, patched_gate
         return text, gate
 
     def _duplicated_heading(self, node: DocumentNode, text: str) -> Optional[str]:
@@ -564,8 +742,8 @@ class ContextualTranslationEngine:
     def _recover_foreign_script(self, node: DocumentNode, failed: EngineNodeResult, context: TranslationContext) -> EngineNodeResult:
         """qwen2.5 thỉnh thoảng chuyển hẳn sang tiếng Trung với prompt dài; thử lại bằng prompt tiếng Việt ngắn.
 
-        Bước 1 dịch lại cả đoạn với prompt tối giản. Nếu vẫn lọt chữ Hán, bước 2 chỉ dịch các cụm
-        chữ Hán còn sót sang tiếng Việt rồi ghép lại. Kết quả vẫn phải qua quality gate như thường.
+        Bước 1 dịch lại cả đoạn với prompt tối giản, bước 2 dịch từng câu. Cụm chữ Hán còn sót được
+        _finalize_candidate thay riêng. Kết quả vẫn phải qua quality gate như thường.
         """
         telemetry = failed.telemetry
         previous = self._context_translations(context)
@@ -606,30 +784,6 @@ class ContextualTranslationEngine:
                 sentence_candidate, sentence_gate = self._finalize_candidate(node, " ".join(parts), previous)
                 if sentence_gate.passed or len(sentence_gate.issues) < len(gate.issues):
                     candidate, gate = sentence_candidate, sentence_gate
-        if not gate.passed and self._has_foreign_script(gate.issues) and self.CJK_RUN.search(candidate):
-            self._emit("TRANSLATION_FOREIGN_SCRIPT_RECOVERY", {"node_id": node.id, "step": "fragments"})
-            pieces = []
-            cursor = 0
-            for match in self.CJK_RUN.finditer(candidate):
-                pieces.append(candidate[cursor:match.start()])
-                try:
-                    telemetry.provider_calls += 1
-                    pieces.append(self._translate_single_with_contract(
-                        match.group(0),
-                        self.FOREIGN_SCRIPT_SYSTEM_PROMPT,
-                        context.glossary,
-                        0.0,
-                        f"Câu tiếng Anh gốc để tham khảo nghĩa:\n{node.content}\n\n"
-                        f"Dịch cụm tiếng Trung sau sang tiếng Việt, chỉ trả về cụm đã dịch:\n{match.group(0)}",
-                    ).strip())
-                except Exception:
-                    pieces.append(match.group(0))
-                cursor = match.end()
-            pieces.append(candidate[cursor:])
-            candidate = VietnamesePostProcessor.normalize_safely(
-                VietnamesePostProcessor.normalize_cjk_punctuation(" ".join(part.strip() for part in pieces if part.strip()))
-            )
-            gate = self._validate_candidate(node.content, candidate, previous)
         return EngineNodeResult(node.id, candidate, gate, gate.passed, attempts=failed.attempts + 1, telemetry=telemetry)
 
     def repair_node(
@@ -657,7 +811,7 @@ class ContextualTranslationEngine:
                 telemetry.provider_calls += 1
                 candidate = self._translate_single_with_contract(
                     node.content,
-                    context.system_prompt,
+                    context.stable_system_prompt,
                     context.glossary,
                     0.1 if attempt == 1 else 0.0,
                     prompt,
@@ -667,9 +821,12 @@ class ContextualTranslationEngine:
                 issues = last.quality.issues
                 continue
             telemetry.latency_ms = (time.perf_counter() - started) * 1000
-            candidate, gate = self._finalize_candidate(node, candidate, self._context_translations(context))
+            candidate, gate, _ = self._finalize_with_patch(node, candidate, self._context_translations(context))
             last = EngineNodeResult(node.id, candidate, gate, gate.passed, attempts=attempt + 1, telemetry=telemetry)
             if gate.passed:
+                return last
+            if self._has_stubborn_residue(node, candidate, gate):
+                last.stubborn_residue = True
                 return last
             issues = gate.issues
         return last
@@ -723,7 +880,7 @@ class ContextualTranslationEngine:
             try:
                 telemetry.provider_calls += 1
                 candidate = self._translate_single_with_contract(
-                    part.text, context.system_prompt, context.glossary, 0.1, prompt,
+                    part.text, context.stable_system_prompt, context.glossary, 0.1, prompt,
                 )
             except Exception as exc:
                 return self._empty_failure(node, "TRANSLATION_PROVIDER_ERROR", str(exc), telemetry)

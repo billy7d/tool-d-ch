@@ -43,11 +43,8 @@ class WorkerNaturalnessProvider(MockProvider):
         self.naturalness_results = [_naturalness("FAIL", 0.58), _naturalness("PASS")]
         self.editorial_calls = 0
 
-    def translate(self, blocks, system_prompt, user_prompt, model=None, temperature=0.2):
-        return [{
-            "node_id": block.get("id"),
-            "text": "Công ty đã đưa ra quyết định để thực hiện hành động ngay lập tức.",
-        } for block in blocks]
+    def translate_single(self, text, system_prompt, glossary_terms=None, model=None, temperature=0.2, user_prompt=None):
+        return "Công ty đã đưa ra quyết định để thực hiện hành động ngay lập tức."
 
     def review_naturalness(self, *args, **kwargs):
         return self.naturalness_results.pop(0)
@@ -63,7 +60,10 @@ def test_worker_saves_only_editorially_approved_candidate(monkeypatch, tmp_path)
     Base.metadata.create_all(sqlite_engine)
     db = sessionmaker(bind=sqlite_engine)()
     project_id = "p0-worker-pipeline"
-    db.add(ProjectModel(id=project_id, title="P0 worker", selected_model="mock", qa_level="HIGH_QUALITY"))
+    db.add(ProjectModel(
+        id=project_id, title="P0 worker", selected_model="mock", qa_level="HIGH_QUALITY",
+        style_guide={"naturalness_critic_mode": "ALWAYS"},
+    ))
     db.add(ChapterModel(id="p0-worker-chapter", project_id=project_id, title="Chapter", order_index=0))
     db.add(NodeModel(
         id="p0-worker-node",

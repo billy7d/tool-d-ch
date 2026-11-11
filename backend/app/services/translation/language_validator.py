@@ -53,6 +53,15 @@ class TargetLanguageValidationResult:
         return asdict(self)
 
 
+# "(New York: Vintage Books, 1965)": dấu hiệu của dòng trích dẫn tài liệu.
+_PUBLICATION_INFO = re.compile(r"\([^()]*:[^()]*\b(?:1[5-9]|20)\d\d\)")
+_CITATION_MAX_CHARS = 300
+
+
+def is_citation(source_text: str) -> bool:
+    return len(source_text) <= _CITATION_MAX_CHARS and bool(_PUBLICATION_INFO.search(source_text))
+
+
 def _unexpected_cjk(source_text: str, translated_text: str) -> Set[str]:
     source_chars = set(VietnamesePostProcessor.CHINESE_PATTERN.findall(source_text or ""))
     target_chars = set(VietnamesePostProcessor.CHINESE_PATTERN.findall(translated_text or ""))
@@ -90,6 +99,9 @@ def validate_target_language(
     source_words = {word.lower() for word in WORD_PATTERN.findall(URL_OR_IDENTIFIER_PATTERN.sub(" ", source_text or ""))}
     lexical_overlap = sum(word in source_words for word in words) / max(total, 1)
     untranslated_phrase = total >= 5 and lexical_overlap >= 0.8 and vi_hits == 0 and diacritic_hits == 0
+    if untranslated_phrase and is_citation(source_text or ""):
+        # Tên sách, tác giả, nhà xuất bản phải giữ nguyên: dòng trích dẫn không có gì để dịch ngoài "p." -> "tr.".
+        untranslated_phrase = False
     if clearly_english or mixed_english or untranslated_phrase:
         return TargetLanguageValidationResult(
             False,

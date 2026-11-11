@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-DOCUMENT_PROFILE_VERSION = "document-profile-v3-source-only"
+DOCUMENT_PROFILE_VERSION = "document-profile-v4-english-summary"
 
 
 @dataclass
@@ -44,7 +44,6 @@ class DocumentTranslationProfile:
             "terminology_observations": self.terminology_notes,
             "style_observations": self.style_notes,
             "source_summary": self.summary,
-            "version": self.version,
         }
 
     @classmethod

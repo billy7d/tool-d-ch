@@ -12,11 +12,18 @@ from app.db.models import NodeModel
 
 
 CHAPTER_MEMORY_VERSION = "chapter-memory-v3-structured"
-CHAPTER_MEMORY_PROMPT_VERSION = "chapter-memory-prompt-v3-json"
+CHAPTER_MEMORY_PROMPT_VERSION = "chapter-memory-prompt-v4-schema"
 CHAPTER_MEMORY_FIELDS = {
     "summary", "entities", "key_concepts", "tone", "pronoun_notes",
     "terminology", "important_facts", "style_notes",
 }
+# Đủ cho khoảng một đoạn trung bình hoặc vài câu thoại. So với 700: tỷ lệ đạt gate không đổi (30/40) mà
+# nhanh hơn ~10% vì phần ngữ cảnh này phải đọc lại ở mỗi lần gọi.
+ROLLING_CONTEXT_MAX_TOKENS = 400
+# Đoạn trước rất dài chỉ giữ phần cuối: vài câu sát đoạn đang dịch mới có ích cho đại từ và mạch văn, còn
+# cả đoạn 2.700 ký tự làm mọi lệnh gọi cho đoạn sau tốn thêm nhiều giây đọc lại.
+ROLLING_ITEM_MAX_CHARS = 600
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…”\"])\s+")
 CHAPTER_MEMORY_LIST_LIMITS = {
     "entities": 20,
     "key_concepts": 15,
@@ -27,11 +34,42 @@ CHAPTER_MEMORY_LIST_LIMITS = {
 }
 
 
+_CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+# Chữ viết hoa đầu câu như "This", "But", "Give" không phải tên riêng; đo thật chúng lọt vào prompt
+# dưới dạng "But" -> "But", tức bảo model giữ nguyên từ tiếng Anh.
+_NOT_A_NAME = {
+    "a", "an", "and", "as", "at", "but", "by", "for", "from", "give", "he", "her", "his", "how", "i", "if", "in",
+    "it", "its", "life", "love", "my", "no", "not", "of", "on", "or", "our", "she", "so", "that", "the", "their",
+    "then", "there", "these", "they", "this", "those", "to", "we", "what", "when", "where", "which", "while",
+    "who", "why", "with", "yes", "you", "your",
+}
+
+
+def _note_text(item: Any) -> Any:
+    """Model nhỏ hay trả ghi chú dạng {"source": "I", "preferred": "tôi"}; đo thật đây là lý do cả Chapter Memory bị bỏ."""
+    if isinstance(item, dict) and {"source", "preferred"} <= set(item):
+        return f'{item["source"]} -> {item["preferred"]}'
+    return item
+
+
+def _without_cjk(items: Any) -> Any:
+    """Bỏ mục lẫn chữ Hán (đo thật: "postulation of a God" -> "tạo hóa một神的存在…") để không nhiễm vào prompt dịch."""
+    if not isinstance(items, list):
+        return items
+    return [item for item in items if not _CJK.search(json.dumps(item, ensure_ascii=False))]
+
+
 def validate_chapter_memory_response(value: Any) -> Dict[str, Any]:
     if isinstance(value, str):
         value = json.loads(value)
     if not isinstance(value, dict) or set(value) != CHAPTER_MEMORY_FIELDS:
         raise ValueError("Chapter Memory phải là object đúng schema.")
+    value = dict(value)
+    for field_name in CHAPTER_MEMORY_LIST_LIMITS:
+        items = _without_cjk(value[field_name])
+        if field_name not in {"entities", "terminology"} and isinstance(items, list):
+            items = [_note_text(item) for item in items]
+        value[field_name] = items
     if not isinstance(value["summary"], str) or len(value["summary"]) > 1800:
         raise ValueError("Chapter Memory summary không hợp lệ.")
     if not isinstance(value["tone"], str) or len(value["tone"]) > 500:
@@ -83,6 +121,10 @@ class ChapterMemory:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    def to_prompt_dict(self) -> Dict[str, Any]:
+        """Chỉ phần có ý nghĩa với người dịch; hash và metadata cache chỉ tốn token (~100 token mỗi request)."""
+        return {name: getattr(self, name) for name in sorted(CHAPTER_MEMORY_FIELDS) if getattr(self, name)}
+
     @classmethod
     def from_dict(cls, value: Dict[str, Any]) -> "ChapterMemory":
         allowed = cls.__dataclass_fields__.keys()
@@ -94,6 +136,15 @@ class BilingualContextItem:
     node_id: str
     source: str
     translation: str
+
+
+def _ending_of(text: str) -> str:
+    """Phần cuối của đoạn, bắt đầu từ đầu một câu để model không gặp câu bị cắt dở."""
+    if len(text) <= ROLLING_ITEM_MAX_CHARS:
+        return text
+    ending = text[-ROLLING_ITEM_MAX_CHARS:]
+    boundary = _SENTENCE_BOUNDARY.search(ending)
+    return ending[boundary.end():] if boundary else ending
 
 
 class ChapterMemoryBuilder:
@@ -128,8 +179,9 @@ class ChapterMemoryBuilder:
             if re.search(rf"(?i)(?<!\w){re.escape(source)}(?!\w)", sample):
                 found.append({"source": source, "preferred": preferred})
                 seen.add(source.lower())
-        for name in re.findall(r"\b[A-Z][A-Za-z.&'-]+(?:\s+[A-Z][A-Za-z.&'-]+){0,3}\b", sample):
-            if name.lower() not in seen and len(name) > 2:
+        # Dấu cách thay vì \s: một cụm viết hoa không được nối qua hai dòng ("Psychotherapy\n\nThe Baby").
+        for name in re.findall(r"\b[A-Z][A-Za-z.&'-]+(?: [A-Z][A-Za-z.&'-]+){0,3}\b", sample):
+            if name.lower() not in seen and len(name) > 2 and name.lower() not in _NOT_A_NAME:
                 found.append({"source": name, "preferred": name})
                 seen.add(name.lower())
             if len(found) >= 20:
@@ -214,7 +266,7 @@ class RollingContextService:
         chapter_id: str,
         before_order_index: int,
         max_nodes: int = 4,
-        max_tokens: int = 700,
+        max_tokens: int = ROLLING_CONTEXT_MAX_TOKENS,
     ) -> List[BilingualContextItem]:
         rows = db.query(NodeModel).filter(
             NodeModel.chapter_id == chapter_id,
@@ -229,9 +281,9 @@ class RollingContextService:
         cls,
         db: Session,
         node: NodeModel,
-        previous: int = 2,
+        previous: int = 4,
         following: int = 2,
-        max_tokens: int = 700,
+        max_tokens: int = ROLLING_CONTEXT_MAX_TOKENS,
     ) -> List[BilingualContextItem]:
         before = db.query(NodeModel).filter(
             NodeModel.chapter_id == node.chapter_id,
@@ -245,16 +297,38 @@ class RollingContextService:
             NodeModel.status.in_(cls.VALIDATED_STATUSES),
             NodeModel.translated_content.isnot(None),
         ).order_by(NodeModel.order_index.asc()).limit(following).all()
-        return cls._bounded(list(reversed(before)) + after, previous + following, max_tokens)
+        return cls._bounded(list(reversed(before)), previous, max_tokens, following=after)
 
     @staticmethod
-    def _bounded(rows: List[NodeModel], max_nodes: int, max_tokens: int) -> List[BilingualContextItem]:
-        selected: List[BilingualContextItem] = []
+    def _bounded(
+        rows: List[NodeModel],
+        max_nodes: int,
+        max_tokens: int,
+        following: Optional[List[NodeModel]] = None,
+    ) -> List[BilingualContextItem]:
+        """Giữ đoạn liền trước trước tiên rồi mới lùi xa dần; đoạn liền sau chỉ lấy khi còn ngân sách.
+
+        Trước đây duyệt từ đoạn cũ nhất nên hai đoạn dài đầu cửa sổ có thể đẩy mất đúng đoạn liền trước,
+        là đoạn quan trọng nhất cho đại từ và mạch văn.
+        """
+        kept: List[NodeModel] = []
         used = 0
-        for row in rows[-max_nodes:]:
-            cost = max(1, int((len(row.content.split()) + len((row.translated_content or "").split())) * 1.45))
-            if selected and used + cost > max_tokens:
-                continue
-            selected.append(BilingualContextItem(row.id, row.content, row.translated_content or ""))
+
+        def take(row: NodeModel) -> None:
+            nonlocal used
+            source, translation = _ending_of(row.content), _ending_of(row.translated_content or "")
+            cost = max(1, int((len(source.split()) + len(translation.split())) * 1.45))
+            if kept and used + cost > max_tokens:
+                return
+            kept.append(row)
             used += cost
-        return selected
+
+        for row in reversed(rows[-max_nodes:]):
+            take(row)
+        for row in following or []:
+            take(row)
+        ordered = sorted(kept, key=lambda row: row.order_index)
+        return [
+            BilingualContextItem(row.id, _ending_of(row.content), _ending_of(row.translated_content or ""))
+            for row in ordered
+        ]

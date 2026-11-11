@@ -33,16 +33,21 @@ def test_prompt_order_keeps_source_and_high_value_context_before_distant_memory(
     prompt = PromptBuilder.build_single_prompt(_node("The board approved the plan."), context, "Chapter 1")
 
     positions = [
-        prompt.index("CURRENT SOURCE"),
         prompt.index("MANDATORY HARD TERMS"),
         prompt.index("IMMEDIATE APPROVED BILINGUAL CONTEXT"),
         prompt.index("RETRIEVED USER STYLE MEMORY"),
         prompt.index("CURATED DOMAIN EXAMPLES"),
-        prompt.index("SOURCE DOCUMENT CHARACTERISTICS"),
-        prompt.index("CHAPTER MEMORY"),
+        # Nguồn đứng cuối, sát lời yêu cầu dịch, để model không dịch luôn phần ngữ cảnh.
+        prompt.index("CURRENT SOURCE"),
     ]
     assert positions == sorted(positions)
     assert "Never copy their facts, entities, numbers, or propositions" in prompt
+
+    # Memory đổi theo chương chứ không theo đoạn nên nằm ở phần đầu ổn định, để Ollama không phải đọc lại.
+    assert "SOURCE DOCUMENT CHARACTERISTICS" not in prompt and "CHAPTER MEMORY" not in prompt
+    stable = context.stable_system_prompt
+    assert stable.index("CONTEXT PRIORITY") < stable.index("SOURCE DOCUMENT CHARACTERISTICS") < stable.index("CHAPTER MEMORY")
+    assert "document observations" in stable and "chapter observations" in stable
 
 
 def test_overflow_trims_distant_context_before_few_shot_and_keeps_required_layers():
