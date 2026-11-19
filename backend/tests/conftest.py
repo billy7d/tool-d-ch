@@ -11,6 +11,8 @@ from pathlib import Path
 _TEST_DATA_ROOT = Path(__file__).resolve().parent.parent / ".test-data"
 _RUN_DIR = _TEST_DATA_ROOT / f"run-{os.getpid()}"
 os.environ.setdefault("TOOL_DICH_DATA_DIR", str(_RUN_DIR))
+# Test không được tự khởi động llama-server thật (chiếm GPU) dù máy có cài.
+os.environ.setdefault("TOOL_DICH_BACKEND", "ollama")
 
 
 def pytest_sessionfinish(session, exitstatus):

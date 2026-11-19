@@ -10,6 +10,7 @@ from app.config import settings
 from app.db.models import ChapterModel, NodeModel
 from app.models.canonical import DocumentNode, NodeStatus
 from app.services.translation.address_terms import AddressTermLedger
+from app.services.translation.form_repair import repair_form
 from app.services.translation.adaptive_chunker import AdaptiveSemanticChunker, SemanticChunk, TextSegment
 from app.services.translation.context_assembler import ContextAssembler, TranslationContext, estimate_tokens
 from app.services.translation.context_memory import BilingualContextItem, ChapterMemory, ChapterMemoryBuilder, RollingContextService
@@ -119,7 +120,7 @@ class ContextualTranslationEngine:
             }
         else:
             self.locked_glossary = legacy_locked_glossary
-        self.glossary_validation_terms: Any = self.glossary_entries or self.locked_glossary
+        has_project_entries = bool(self.glossary_entries)
         self.soft_glossary = {
             str(item.get("source_term", "")): str(item.get("preferred_target", item.get("target_term", "")))
             for item in self.glossary_entries
@@ -134,6 +135,17 @@ class ContextualTranslationEngine:
         )
         self.glossary_entries.extend(presets)
         self.soft_glossary.update({item["source_term"]: item["preferred_target"] for item in presets})
+        # Gate phải biết cả preset: preset TECHNICAL bảo giữ "commit", trước đây project chưa có glossary thì gate vẫn coi
+        # "commit" là chữ tiếng Anh sót và đưa đoạn đi dịch lại rồi chờ duyệt (10/12 đoạn Pro Git khi dịch thử).
+        if has_project_entries:
+            self.glossary_validation_terms: Any = self.glossary_entries
+        elif presets:
+            self.glossary_validation_terms = [
+                {"source_term": source, "preferred_target": target, "lock_level": "HARD"}
+                for source, target in self.locked_glossary.items()
+            ] + list(presets)
+        else:
+            self.glossary_validation_terms = self.locked_glossary
         self.event_callback = event_callback
         self.address_ledger = AddressTermLedger.from_style_guide(config.style_guide, config.document_type)
         self.capabilities = provider.get_model_capabilities(config.model_name)
@@ -468,6 +480,18 @@ class ContextualTranslationEngine:
             results.append(repaired)
         return EngineBatchResult(results, mapping_error, telemetry)
 
+    def peek_translation_request(self, chapter: ChapterModel, node: DocumentNode) -> Optional[tuple]:
+        """Yêu cầu dịch lượt đầu mà translate_node sẽ gửi cho đoạn này với trạng thái DB hiện tại; không gọi model."""
+        if chapter.id not in self._chapter_memories:
+            return None  # dựng bộ nhớ chương là một lệnh gọi model, không làm ở bước xem trước
+        context = self.assemble_context(chapter, [node], "single", neighbors=True)
+        if not context.fits:
+            return None
+        prompt = PromptBuilder.build_single_prompt(node, context, chapter.title)
+        if not self._request_fits(context, prompt):
+            return None
+        return node.content, context.stable_system_prompt, context.glossary, self.config.model_name, 0.15, prompt
+
     def translate_node(self, chapter: ChapterModel, node: DocumentNode, max_attempts: int = 2) -> EngineNodeResult:
         context = self.assemble_context(chapter, [node], "single", neighbors=True)
         if not context.fits:
@@ -525,7 +549,7 @@ class ContextualTranslationEngine:
 
     def _finalize_candidate(self, node: DocumentNode, candidate: str, previous: Optional[List[str]] = None):
         """Chuẩn hóa, sửa deterministic những lỗi chắc chắn sửa được, rồi chạy gate."""
-        text = VietnamesePostProcessor.normalize_safely(candidate or "")
+        text = repair_form(node.content or "", VietnamesePostProcessor.normalize_safely(candidate or ""))
         node_type = str(getattr(getattr(node, "type", None), "value", getattr(node, "type", "")) or "").lower()
         if node_type.startswith("heading") and not self.SOURCE_LABEL.search(node.content or ""):
             # Model chép "Chương 1:" từ tiêu đề chương trong context vào heading con ("Legal Terms").
@@ -651,7 +675,18 @@ class ContextualTranslationEngine:
             # Model hay in đậm chỗ vừa thay ("**không bao giờ**"); bản dịch sách không có markdown.
             patched = patched.replace("**", "")
         # Thêm câu hoặc dài hẳn ra nghĩa là model đã chép cả đoạn sau vào chứ không chỉ sửa câu này.
-        same_shape = len(SENTENCE_SPLIT.split(patched)) <= len(SENTENCE_SPLIT.split(sentence))
+        wanted = len(SENTENCE_SPLIT.split(sentence))
+        parts = SENTENCE_SPLIT.split(patched)
+        if patched and len(parts) > wanted:
+            # Dịch thử Sherlock Holmes: "Bán hàng cười grimly." sửa đúng thành "Bán hàng cười lạnh lùng." rồi chép
+            # thêm câu thoại tiếng Anh phía sau, nên cả bản sửa bị bỏ. Giữ đúng số câu được yêu cầu khi phần đó
+            # vẫn là câu cũ (đủ các từ không phải chữ sót).
+            prefix = " ".join(parts[:wanted]).strip()
+            kept_words = [word for word in re.findall(r"\w+", sentence.lower()) if word not in {w.lower() for w in words}]
+            prefix_words = set(re.findall(r"\w+", prefix.lower()))
+            if kept_words and sum(word in prefix_words for word in kept_words) >= 0.6 * len(kept_words):
+                patched = prefix
+        same_shape = len(SENTENCE_SPLIT.split(patched)) <= wanted
         if patched and same_shape and len(patched) <= len(sentence) * 1.6 + 40:
             return patched
         return sentence
@@ -897,5 +932,6 @@ class ContextualTranslationEngine:
             total_telemetry.total_tokens = max(total_telemetry.total_tokens, telemetry.total_tokens)
             index += 1
         combined = "".join(part.text + part.separator_after for part in translated_parts).rstrip()
+        combined = repair_form(node.content or "", combined)
         gate = self._validate_candidate(node.content, combined)
         return EngineNodeResult(node.id, combined, gate, gate.passed, attempts=max(1, len(translated_parts)), telemetry=total_telemetry)

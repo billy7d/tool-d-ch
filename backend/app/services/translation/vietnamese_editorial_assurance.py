@@ -120,7 +120,7 @@ class TranslationPublicationAssuranceService:
         soft = [
             entry for entry in getattr(engine, "glossary_entries", None) or []
             if str(entry.get("lock_level", "")).upper() == "SOFT" and entry.get("source_term")
-            and TermMatcher.contains(source_text or "", str(entry["source_term"]))
+            and TermMatcher.contains_source_term(source_text or "", str(entry["source_term"]))
         ]
         present = [str(entry["source_term"]).casefold() for entry in soft]
         hints = []
@@ -131,7 +131,7 @@ class TranslationPublicationAssuranceService:
                 continue
             options = [str(entry.get("preferred_target", ""))] + [str(item) for item in entry.get("allowed_variants") or []]
             options = [option for option in options if option]
-            if not source_term or not options or not TermMatcher.contains(source_text or "", source_term):
+            if not source_term or not options or not TermMatcher.contains_source_term(source_text or "", source_term):
                 continue
             if any(option.casefold() in target for option in options):
                 continue
@@ -450,6 +450,7 @@ class TranslationPublicationAssuranceService:
             TranslationCommitService.commit_validated_translation(
                 engine.db, engine.project_id, node, approved.translated_text, signature,
                 glossary, model_name, created_by, instruction=instruction,
+                validation_terms=getattr(engine, "glossary_validation_terms", None),
                 resolved_issue_ids=resolved_issue_ids,
                 semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
                 latency_ms=latency_ms,
@@ -474,6 +475,7 @@ class TranslationPublicationAssuranceService:
             TranslationCommitService.commit_validated_translation(
                 engine.db, engine.project_id, node, approved.translated_text, signature,
                 glossary, model_name, created_by, instruction=instruction,
+                validation_terms=getattr(engine, "glossary_validation_terms", None),
                 resolved_issue_ids=resolved_issue_ids,
                 semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
                 latency_ms=latency_ms,
@@ -489,6 +491,7 @@ class TranslationPublicationAssuranceService:
             TranslationCommitService.commit_validated_translation(
                 engine.db, engine.project_id, node, approved.translated_text, signature,
                 glossary, model_name, created_by, instruction=instruction,
+                validation_terms=getattr(engine, "glossary_validation_terms", None),
                 resolved_issue_ids=resolved_issue_ids,
                 semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
                 latency_ms=latency_ms,
@@ -515,6 +518,7 @@ class TranslationPublicationAssuranceService:
             TranslationCommitService.commit_validated_translation(
                 engine.db, engine.project_id, node, approved.translated_text, signature,
                 glossary, model_name, created_by, instruction=instruction,
+                validation_terms=getattr(engine, "glossary_validation_terms", None),
                 resolved_issue_ids=resolved_issue_ids,
                 semantic_result=approved.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
                 latency_ms=latency_ms,
@@ -697,6 +701,7 @@ class TranslationPublicationAssuranceService:
         TranslationCommitService.commit_validated_translation(
             engine.db, engine.project_id, node, final_result.translated_text, signature,
             glossary, model_name, created_by, instruction=instruction,
+            validation_terms=getattr(engine, "glossary_validation_terms", None),
             resolved_issue_ids=resolved_issue_ids,
             semantic_result=final_result.audit_payload(getattr(engine.config, "semantic_critic_model", None) or model_name),
             latency_ms=latency_ms + rewrite_latency,

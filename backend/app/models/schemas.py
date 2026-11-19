@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
+from app.services.translation.model_defaults import default_model
 from app.models.canonical import (
     NodeType,
     NodeStatus,
@@ -24,7 +25,7 @@ class ProjectCreate(BaseModel):
     target_language: str = "vi"
     document_type: DocumentType = DocumentType.GENERAL
     translation_mode: TranslationMode = TranslationMode.NATURAL
-    selected_model: str = "qwen2.5:7b"
+    selected_model: str = Field(default_factory=default_model)
 
 
 class ProjectUpdate(BaseModel):

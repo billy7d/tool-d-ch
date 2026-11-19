@@ -63,6 +63,17 @@ class GlossaryService:
         return [cls.to_context_entry(term) for term in terms]
 
     @classmethod
+    def get_validation_terms(cls, db: Session, project_id: str, document_type: str = "", style_guide: Any = None) -> Any:
+        """Bộ thuật ngữ cho Quality Gate ngoài engine (QA): giống engine, gồm thuật ngữ của project và preset lĩnh vực."""
+        from app.services.translation.glossary_presets import preset_entries, presets_for
+
+        entries = cls.get_contextual_glossary(db, project_id, domain=document_type)
+        presets = preset_entries(
+            presets_for(style_guide or {}, document_type), existing_sources=[entry["source_term"] for entry in entries],
+        )
+        return entries + presets if (entries or presets) else {}
+
+    @classmethod
     def get_soft_glossary_map(cls, db: Session, project_id: str, domain: str = "") -> Dict[str, str]:
         return {
             item["source_term"]: item["preferred_target"]

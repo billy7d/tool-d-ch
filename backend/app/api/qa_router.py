@@ -199,6 +199,12 @@ def run_qa_checks(
 
     try:
         locked_glossary = GlossaryService.get_locked_glossary_map(db, project_id)
+        # QA dùng cùng bộ thuật ngữ với gate lúc dịch (gồm preset lĩnh vực) để không báo lại các từ preset cho giữ.
+        project = ProjectRepository(db).get_project(project_id)
+        qa_config = TranslationConfig.from_project(project) if project else None
+        validation_terms = GlossaryService.get_validation_terms(
+            db, project_id, getattr(qa_config, "document_type", ""), getattr(qa_config, "style_guide", {}),
+        ) or locked_glossary
         # Clear existing open issues
         db.query(QAIssueModel).filter(
             QAIssueModel.project_id == project_id,
@@ -226,7 +232,7 @@ def run_qa_checks(
 
         for n in nodes:
             # 1. Deterministic QA
-            issues = DeterministicQA.audit_node(n, locked_glossary)
+            issues = DeterministicQA.audit_node(n, validation_terms)
             for iss in issues:
                 qa_repo.add_issue(
                     project_id=project_id,
@@ -472,7 +478,7 @@ def retranslate_all_qa_issues(
                     continue
                 result = engine.repair_node(chapter, engine.canonical_node(node), node_issues)
                 probe = NodeModel(content=node.content, translated_content=result.translated_text)
-                deterministic_issues = DeterministicQA.audit_node(probe, locked_glossary)
+                deterministic_issues = DeterministicQA.audit_node(probe, engine.glossary_validation_terms)
                 if not result.passed:
                     node.status = "NEEDS_REVIEW"
                     db.commit()

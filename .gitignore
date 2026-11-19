@@ -141,3 +141,6 @@ desktop.ini
 .vscode/
 *.sublime-project
 *.sublime-workspace
+
+# Công cụ tải về (llama.cpp) không thuộc mã nguồn dự án
+tools/

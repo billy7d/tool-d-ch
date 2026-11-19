@@ -65,7 +65,9 @@ export const Step5Translate: React.FC<Step5TranslateProps> = ({ project, onNext,
       }));
 
       const hw = await apiClient.getHardwareInfo();
-      setOllamaOnline(hw.ollama_running);
+      // Model GGUF tải riêng (Gemma 4) chạy bằng llama-server, không cần Ollama: khi Ollama tắt,
+      // installed_models chỉ còn các model đó nên có tên model của dự án là dịch được.
+      setOllamaOnline(hw.ollama_running || hw.installed_models.includes(project.selected_model));
     } catch (e) {
       console.error(e);
     }

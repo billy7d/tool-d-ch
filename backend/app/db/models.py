@@ -15,6 +15,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship
 
+
+def _default_model() -> str:
+    # Import muộn: model_defaults đọc thư mục model và llama-server, không cần khi chỉ nạp schema DB.
+    from app.services.translation.model_defaults import default_model
+
+    return default_model()
+
 Base = declarative_base()
 
 
@@ -32,7 +39,7 @@ class ProjectModel(Base):
     current_stage = Column(String(32), default="IMPORTED")
     structure_version = Column(Integer, default=1)
     structure_confirmed = Column(Boolean, default=False)
-    selected_model = Column(String(128), default="qwen2.5:7b")
+    selected_model = Column(String(128), default=_default_model)
     qa_level = Column(String(32), default="BALANCED")
     style_guide = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

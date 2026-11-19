@@ -146,7 +146,7 @@ class PromptBuilder:
         combined = " ".join(node.content for node in nodes)
         return {
             source: target for source, target in (glossary_terms or {}).items()
-            if TermMatcher.contains(combined, source)
+            if TermMatcher.contains_source_term(combined, source)
         }
 
     @classmethod

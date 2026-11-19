@@ -4,12 +4,14 @@ from app.db.models import NodeModel
 from app.db.repository import QARepository
 from app.services.translation.worker import translation_worker
 from app.services.translation.glossary_service import GlossaryService
+from app.services.translation.model_defaults import default_model
 from app.services.qa.result_validator import validate_qa_result
 
 
 class AIQAEngine:
     @staticmethod
-    def audit_node_ai(db: Session, project_id: str, node: NodeModel, model_name: str = "qwen2.5:7b") -> Optional[Dict[str, Any]]:
+    def audit_node_ai(db: Session, project_id: str, node: NodeModel, model_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        model_name = model_name or default_model()
         if not node.translated_content or not node.content:
             return None
 

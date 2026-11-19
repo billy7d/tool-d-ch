@@ -45,7 +45,7 @@ class GlossaryValidator:
         violations: List[GlossaryViolation] = []
         warnings: List[GlossaryViolation] = []
         for source_term, expected_target, lock_level, allowed_variants in cls._entries(glossary_terms):
-            if not cls._contains_term(source_text, source_term):
+            if not TermMatcher.contains_source_term(source_text, source_term):
                 continue
             if cls._contains_term(translated_text, expected_target) or any(
                 cls._contains_term(translated_text, variant) for variant in allowed_variants

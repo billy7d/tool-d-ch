@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from app.services.translation.prompt_profiles import get_style_pack
+from app.services.translation.model_defaults import default_model
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,7 @@ class TranslationConfig:
         return cls(
             source_language=str(getattr(project, "source_language", None) or "en"),
             target_language=str(getattr(project, "target_language", None) or "vi"),
-            model_name=str(model_override or getattr(project, "selected_model", None) or "qwen2.5:7b"),
+            model_name=str(model_override or getattr(project, "selected_model", None) or default_model()),
             translation_mode=translation_mode,
             document_type=document_type,
             register=register,
@@ -88,8 +89,8 @@ class TranslationConfig:
             semantic_risk_medium=float(style_guide.get("semantic_risk_medium", 0.35)),
             semantic_risk_high=float(style_guide.get("semantic_risk_high", 0.65)),
             semantic_max_repairs=max(0, min(2, int(style_guide.get("semantic_max_repairs", 2)))),
-            semantic_critic_model=str(style_guide.get("semantic_critic_model") or model_override or getattr(project, "selected_model", None) or "qwen2.5:7b"),
-            naturalness_critic_model=str(style_guide.get("naturalness_critic_model") or model_override or getattr(project, "selected_model", None) or "qwen2.5:7b"),
+            semantic_critic_model=str(style_guide.get("semantic_critic_model") or model_override or getattr(project, "selected_model", None) or default_model()),
+            naturalness_critic_model=str(style_guide.get("naturalness_critic_model") or model_override or getattr(project, "selected_model", None) or default_model()),
             naturalness_pass_threshold=naturalness_pass_threshold,
             naturalness_rewrite_threshold=naturalness_rewrite_threshold,
             editorial_max_rewrites=max(0, min(1, int(style_guide.get("editorial_max_rewrites", 1)))),

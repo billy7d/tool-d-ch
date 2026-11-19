@@ -314,6 +314,33 @@ class OllamaProvider(TranslationProvider):
             pass
         return ""
 
+    def json_task(
+        self, system_message: str, user_message: str, schema: Dict[str, Any],
+        model: Optional[str] = None, num_predict: int = 400, temperature: float = 0.1,
+    ) -> Dict[str, Any]:
+        """Một lệnh hỏi-đáp trả JSON theo schema, cho các bước chuẩn bị chạy một lần mỗi cuốn sách."""
+        target_model = model or self.default_model
+        payload = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            "format": schema,
+            "stream": False,
+            "keep_alive": "60m",
+            "options": self._options(target_model, temperature, num_predict),
+        }
+        try:
+            response = self.session.post(f"{self.base_url}/api/chat", json=payload, timeout=180.0)
+            if response.status_code == 200:
+                parsed = json.loads(response.json().get("message", {}).get("content", ""))
+                return parsed if isinstance(parsed, dict) else {}
+            logger.warning("JSON task HTTP %s: %s", response.status_code, response.text[:200])
+        except Exception as exc:
+            logger.warning("JSON task failed: %s", exc)
+        return {}
+
     def build_chapter_memory(
         self,
         text_sample: str,

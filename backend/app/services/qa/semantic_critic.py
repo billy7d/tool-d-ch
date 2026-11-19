@@ -233,8 +233,11 @@ _ADDITION_CLAIM = re.compile(
     r"not (?:present|found|mentioned|in the (?:original|source))|adds?\b|added|introduc|does not appear|absent from",
     re.IGNORECASE,
 )
-_QUOTED_SNIPPET = re.compile(r"'([^']{3,120})'|\"([^\"]{3,120})\"|“([^”]{3,120})”|‘([^’]{3,120})’|\(([^()]{3,120})\)")
-_ASCII_TEXT = re.compile(r"^[A-Za-z][A-Za-z0-9 ,.;:'’\-]*$")
+# Tới 400 ký tự: critic hay trích nguyên một câu dài của nguồn rồi báo "is added"; giới hạn 120 cũ làm các câu
+# đó không được đối chiếu với nguồn (2/16 lượt đánh rớt trên 80 đoạn sách thật).
+_QUOTED_SNIPPET = re.compile(r"'([^']{3,400})'|\"([^\"]{3,400})\"|“([^”]{3,400})”|‘([^’]{3,400})’|\(([^()]{3,400})\)")
+# Vẫn chỉ nhận tiếng Anh (không có chữ có dấu), nhưng cho phép dấu câu in sách: gạch dài, ngoặc cong, ba chấm.
+_ASCII_TEXT = re.compile(r"^[A-Za-z][A-Za-z0-9 ,.;:!?'’“”\-—–…]*$")
 
 
 def _normalize_words(text: str) -> str:

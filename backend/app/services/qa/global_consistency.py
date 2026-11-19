@@ -58,7 +58,7 @@ class GlobalConsistencyScanner:
                     ))
         glossary_items = db.query(GlossaryModel).filter(GlossaryModel.project_id == project_id).all()
         for term in glossary_items:
-            occurrences = [node for node in nodes if TermMatcher.contains(node.content or "", term.source_term)]
+            occurrences = [node for node in nodes if TermMatcher.contains_source_term(node.content or "", term.source_term)]
             deviations = [node for node in occurrences if not TermMatcher.contains(node.translated_content or "", term.target_term)]
             if len(occurrences) >= 2 and deviations:
                 finding = {

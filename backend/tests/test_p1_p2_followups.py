@@ -57,7 +57,11 @@ def test_presets_never_drop_legacy_hard_terms_or_override_project_terms(tmp_path
     engine, _, _ = _engine(tmp_path / "b", monkeypatch, locked={"Agreement": "Thỏa thuận"})
     # Hard term truyền riêng (legacy) vẫn còn dù preset đã thêm entry mềm.
     assert engine.locked_glossary == {"Agreement": "Thỏa thuận"}
-    assert engine.glossary_validation_terms == {"Agreement": "Thỏa thuận"}
+    # Gate kiểm cả hard term legacy lẫn preset (preset chỉ là SOFT nên không bao giờ chặn bản dịch).
+    terms = engine.glossary_validation_terms
+    assert {"source_term": "Agreement", "preferred_target": "Thỏa thuận", "lock_level": "HARD"} in terms
+    assert all(item["lock_level"] == "SOFT" for item in terms if str(item.get("id", "")).startswith("preset:"))
+    assert any(str(item.get("id", "")).startswith("preset:") for item in terms)
 
 
 def test_preset_entries_skip_terms_the_project_already_has():

@@ -300,3 +300,24 @@ def test_document_summary_is_requested_in_english(monkeypatch):
     sent = _capture_ollama_payloads(monkeypatch)
     OllamaProvider().summarize_context("Some text.", model="qwen2.5:7b")
     assert "(in English)" in sent[0]["messages"][0]["content"]
+
+
+LONG_SENTENCE = (
+    "We do not fall in love with our friends of the same sex—unless we are homosexually oriented—even though "
+    "we may care for them greatly."
+)
+
+
+def test_long_quoted_sentence_that_exists_in_source_is_refuted():
+    source = "We do not fall in love with our children. " + LONG_SENTENCE + " We fall in love only when motivated."
+    result, refuted = refute_false_additions(source, _fail(
+        {"type": "SEMANTIC_ADDITION", "message": f"'{LONG_SENTENCE}' is added."},
+    ))
+    assert refuted == 1 and result.status == "PASS"
+
+
+def test_long_quoted_sentence_missing_from_source_is_kept():
+    result, refuted = refute_false_additions("We do not fall in love with our children.", _fail(
+        {"type": "SEMANTIC_ADDITION", "message": f"'{LONG_SENTENCE}' is added."},
+    ))
+    assert refuted == 0 and result.status == "FAIL"

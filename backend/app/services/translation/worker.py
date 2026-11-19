@@ -4,12 +4,18 @@ import threading
 import json
 import os
 from typing import Dict, Any, Optional, Callable, List
+from app.config import settings
+from app.services.reconstruction.page_break_joiner import join_pending_nodes
+from app.services.translation.term_consistency import ensure_auto_terms
 from app.db.engine import get_project_db, sync_project_progress
 from app.db.models import ProjectModel, ChapterModel, NodeModel
 from app.db.repository import ProjectRepository
 from app.services.translation.review_draft import clear_review_draft, save_review_draft
 from app.services.translation.provider_base import TranslationProvider
 from app.services.translation.ollama_provider import OllamaProvider
+from app.services.translation.llama_server_manager import LlamaServerManager
+from app.services.translation.llama_server_provider import LlamaServerProvider
+from app.services.translation.model_defaults import default_model
 from app.services.translation.mock_provider import MockProvider
 from app.services.translation.prompt_builder import PromptBuilder
 from app.services.translation.translation_memory import TranslationMemoryService
@@ -93,6 +99,10 @@ class TranslationWorker:
     def get_provider(self, model_name: str) -> TranslationProvider:
         if model_name.lower().startswith("mock") or model_name.lower().startswith("demo"):
             return MockProvider()
+        if os.environ.get("TOOL_DICH_BACKEND", "auto").lower() != "ollama":
+            manager = LlamaServerManager.shared()
+            if manager.available(model_name):
+                return LlamaServerProvider(default_model=model_name, manager=manager)
         return OllamaProvider(default_model=model_name)
 
     def translate_project_sync(
@@ -117,7 +127,8 @@ class TranslationWorker:
             override_provider=provider
         )
 
-    def start_translation(self, project_id: str, model_name: str = "qwen2.5:7b", custom_instructions: Optional[str] = None):
+    def start_translation(self, project_id: str, model_name: Optional[str] = None, custom_instructions: Optional[str] = None):
+        model_name = model_name or default_model()
         # First recover any stuck states
         self.recover_crashed_jobs(project_id)
 
@@ -174,7 +185,7 @@ class TranslationWorker:
 
     def retry_failed(self, project_id: str):
         db = get_project_db(project_id)
-        model_name = "qwen2.5:7b"
+        model_name = default_model()
         try:
             project = db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
             if project and project.selected_model:
@@ -231,6 +242,41 @@ class TranslationWorker:
                 "editorial_rewrite_success": result.editorial_rewrite_success,
             })
 
+    @staticmethod
+    def _speculate_next(db, engine, provider, chapter, db_node, candidate: str, translatable_types) -> None:
+        """Trong lúc đoạn này được chấm, cho model dịch trước đoạn kế tiếp như thể đoạn này đã được duyệt nguyên văn.
+
+        Chỉ là đoán trước: provider chỉ dùng kết quả khi lệnh dịch thật của đoạn kế tiếp trùng từng ký tự.
+        """
+        speculate = getattr(provider, "speculate_translation", None)
+        if speculate is None or db_node is None or os.environ.get("TOOL_DICH_SPECULATE", "1") == "0":
+            return
+        if db.new or db.dirty or db.deleted:
+            return  # còn thay đổi chưa lưu thì không được rollback ở bước xem trước
+        try:
+            following = db.query(NodeModel).filter(
+                NodeModel.chapter_id == chapter.id,
+                NodeModel.node_type.in_(translatable_types),
+                NodeModel.status.in_(["PENDING", "FAILED"]),
+                NodeModel.id != db_node.id,
+            ).order_by(NodeModel.order_index).first()
+            if following is None or has_no_words(following.content):
+                return
+            next_node = engine.canonical_node(following)
+            request = None
+            try:
+                db_node.status = "TRANSLATED"
+                db_node.translated_content = candidate
+                db.flush()
+                request = engine.peek_translation_request(chapter, next_node)
+            finally:
+                db.rollback()
+            if request:
+                speculate(*request)
+        except Exception:
+            # Dịch trước chỉ để tiết kiệm thời gian; lỗi ở đây không được ảnh hưởng tới lượt dịch chính.
+            db.rollback()
+
     def _run_translation_loop(
         self,
         project_id: str,
@@ -262,6 +308,12 @@ class TranslationWorker:
                         "message": "Không thể kết nối provider dịch local.",
                     })
                     return
+
+            # Dự án nhập trước khi có bước nối đoạn ngắt trang: nối các đoạn chưa dịch trước khi bắt đầu.
+            if join_pending_nodes(db, project_id):
+                db.commit()
+            # Chạy trước khi tạo engine để thuật ngữ mới có mặt trong glossary của lượt dịch này. Mặc định tắt.
+            ensure_auto_terms(db, project_id, provider, model_name, settings.PROJECTS_DIR / project_id / "cache")
 
             config = TranslationConfig.from_project(
                 project,
@@ -310,11 +362,11 @@ class TranslationWorker:
                         style_hash=signature.style_hash,
                         glossary_hash=signature.glossary_hash,
                         prompt_version=signature.prompt_version,
-                        locked_glossary=locked_glossary,
+                        locked_glossary=engine.glossary_validation_terms,
                     )
                     if tm_hit:
                         tm_quality = TranslationQualityGate().validate(
-                            first_model.content, tm_hit, locked_glossary,
+                            first_model.content, tm_hit, engine.glossary_validation_terms,
                         )
                         if tm_quality.passed:
                             semantic = SemanticAssuranceService.assure_and_commit(
@@ -353,12 +405,27 @@ class TranslationWorker:
                         source_node = next(node for node in chunk.nodes if node.id == result.node_id)
                         if result.passed:
                             db_node = db.query(NodeModel).filter(NodeModel.id == result.node_id).first()
-                            semantic = SemanticAssuranceService.assure_and_commit(
-                                engine, chapter, db_node, result.translated_text, signature,
-                                config.model_name, "translation_worker",
-                                latency_ms=result.telemetry.latency_ms,
-                                previous_repairs=max(0, result.attempts - 1),
-                            )
+                            self._speculate_next(db, engine, provider, chapter, db_node, result.translated_text, translatable_types)
+                            try:
+                                semantic = SemanticAssuranceService.assure_and_commit(
+                                    engine, chapter, db_node, result.translated_text, signature,
+                                    config.model_name, "translation_worker",
+                                    latency_ms=result.telemetry.latency_ms,
+                                    previous_repairs=max(0, result.attempts - 1),
+                                )
+                            except ValueError as exc:
+                                # Bước lưu từ chối một đoạn (gate cuối, chính sách lưu): đoạn đó chờ duyệt kèm bản nháp.
+                                # Trước đây lỗi này làm dừng cả lượt dịch và mọi đoạn sau bị bỏ dở (dịch thử Pro Git).
+                                db.rollback()
+                                db_node = db.query(NodeModel).filter(NodeModel.id == result.node_id).first()
+                                if db_node:
+                                    db_node.status = "NEEDS_REVIEW"
+                                    save_review_draft(db_node, result.translated_text, ["COMMIT_REJECTED"], "COMMIT")
+                                    db.commit()
+                                self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {
+                                    "project_id": project_id, "node_id": result.node_id, "issues": ["COMMIT_REJECTED"], "message": str(exc),
+                                })
+                                continue
                             self._broadcast_assurance_telemetry(project_id, result.node_id, semantic)
                             if not semantic.approved:
                                 self.broadcast_event("TRANSLATION_NODE_NEEDS_REVIEW", {

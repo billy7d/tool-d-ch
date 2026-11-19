@@ -15,6 +15,7 @@ from app.models.canonical import (
 )
 from app.services.reconstruction.paragraph_repair import ParagraphRepair
 from app.services.reconstruction.header_footer_filter import HeaderFooterFilter
+from app.services.reconstruction.page_break_joiner import join_chapter_nodes
 
 
 class StructureBuilder:
@@ -109,7 +110,7 @@ class StructureBuilder:
                     level=1,
                     source_pages=list(set(current_chapter_pages)),
                     order_index=chapter_idx - 1,
-                    nodes=current_chapter_nodes
+                    nodes=join_chapter_nodes(current_chapter_nodes)
                 ))
                 chapter_idx += 1
                 current_chapter_nodes = []
@@ -127,6 +128,7 @@ class StructureBuilder:
             # Sort reading order
             sorted_blocks = ParagraphRepair.sort_reading_order(filtered_blocks, page_width)
 
+            page_has_heading = False
             for b in sorted_blocks:
                 b_type = b.get("type", "text")
                 b_id = b.get("block_id", 0)
@@ -155,9 +157,60 @@ class StructureBuilder:
                     current_chapter_pages.append(page_num)
                     continue
 
+                if b_type == "code":
+                    # Khối code giữ nguyên từng ký tự và không dịch (CODE_BLOCK không thuộc loại được dịch).
+                    code = (b.get("text") or "").strip("\n")
+                    if code.strip():
+                        current_chapter_nodes.append(DocumentNode(
+                            id=f"code_{chapter_idx:04d}_{node_counter:05d}",
+                            type=NodeType.CODE_BLOCK,
+                            content=code,
+                            source_mapping=source_mapping,
+                            metadata=NodeMetadata(code_language=b.get("code_language"), confidence=confidence),
+                            order_index=node_counter,
+                        ))
+                        node_counter += 1
+                        current_chapter_pages.append(page_num)
+                    continue
+
                 # Text blocks
                 raw_text = b.get("text", "").strip()
                 if not raw_text:
+                    continue
+
+                if b.get("structured"):
+                    # EPUB/DOCX đã cho biết khối nào là tiêu đề, cấp mấy: dùng đúng thông tin đó thay cho đoán theo cỡ chữ.
+                    # Dịch thử EPUB: h4 bị đoán là đoạn văn nên model viết thêm cả một mục dưới tiêu đề "Applying a
+                    # Patch with am", và tiêu đề "Git Branching Issues" nhận lại bản dịch của đoạn trước.
+                    cleaned_text = ParagraphRepair.repair_hyphenation(raw_text)
+                    if b_type == "heading":
+                        level = int(b.get("heading_level") or 2)
+                        if level <= 2 and not page_has_heading:
+                            # Tiêu đề lớn đầu tiên của mỗi tài liệu trong EPUB mở một chương mới.
+                            if current_chapter_nodes:
+                                finalize_chapter()
+                            current_chapter_num = ""
+                            current_chapter_title = p_data.get("title") or cleaned_text
+                        page_has_heading = True
+                        current_chapter_nodes.append(DocumentNode(
+                            id=f"heading_{chapter_idx:04d}_{node_counter:05d}",
+                            type=NodeType.HEADING,
+                            content=cleaned_text,
+                            source_mapping=source_mapping,
+                            metadata=NodeMetadata(heading_level=min(level, 4), is_bold=True, confidence=confidence),
+                            order_index=node_counter,
+                        ))
+                    else:
+                        current_chapter_nodes.append(DocumentNode(
+                            id=f"paragraph_{chapter_idx:04d}_{node_counter:05d}",
+                            type=NodeType.PARAGRAPH,
+                            content=cleaned_text,
+                            source_mapping=source_mapping,
+                            metadata=NodeMetadata(list_type="bullet" if b.get("list_item") else None, confidence=confidence),
+                            order_index=node_counter,
+                        ))
+                    node_counter += 1
+                    current_chapter_pages.append(page_num)
                     continue
 
                 # Repair hyphenation and broken lines

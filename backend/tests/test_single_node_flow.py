@@ -117,8 +117,17 @@ def test_word_the_model_keeps_leaving_in_goes_to_review_without_more_attempts(mo
     assert not any(call["system"] == ContextualTranslationEngine.FOREIGN_SCRIPT_SYSTEM_PROMPT for call in provider.single_calls)
 
 
-def test_patch_that_adds_a_sentence_is_rejected(monkeypatch, tmp_path):
+def test_patch_that_adds_a_sentence_keeps_only_the_fixed_sentence(monkeypatch, tmp_path):
+    # Model sửa đúng câu rồi chép thêm câu sau: chỉ giữ câu được yêu cầu, không lặp câu sau.
     provider = PatchingProvider("Như những dây đàn tách biệt nhau. Chúng cùng rung lên một khúc nhạc.")
+    db, _ = _run(monkeypatch, tmp_path, provider)
+    node = db.query(NodeModel).filter_by(id="n2").one()
+    assert node.status == "TRANSLATED"
+    assert node.translated_content == "Như những dây đàn tách biệt nhau. Chúng cùng rung lên một khúc nhạc."
+
+
+def test_patch_that_rewrites_into_another_sentence_is_rejected(monkeypatch, tmp_path):
+    provider = PatchingProvider("Âm nhạc vang lên khắp phòng. Mọi người đều im lặng lắng nghe.")
     db, _ = _run(monkeypatch, tmp_path, provider)
     assert db.query(NodeModel).filter_by(id="n2").one().status == "NEEDS_REVIEW"
 
@@ -180,3 +189,22 @@ def test_stray_chinese_is_replaced_in_place_without_retranslating_the_paragraph(
     assert node.status == "TRANSLATED"
     assert node.translated_content == "Như hàng ngàn dây đàn tách biệt nhau. Chúng cùng rung lên một khúc nhạc."
     assert not any("VALIDATION OR QA ISSUES" in call["user"] for call in provider.single_calls)
+
+
+def test_one_node_rejected_at_commit_does_not_stop_the_book(monkeypatch, tmp_path):
+    """Bước lưu từ chối một đoạn thì đoạn đó chờ duyệt; trước đây cả lượt dịch dừng và các đoạn sau bị bỏ dở."""
+    from app.services.translation.semantic_assurance import SemanticAssuranceService
+
+    original = SemanticAssuranceService.assure_and_commit.__func__
+
+    def flaky(cls, engine, chapter, node, translated_text, *args, **kwargs):
+        if node.id == "n1":
+            raise ValueError("Candidate không qua Quality Gate cuối: ENGLISH_RESIDUE")
+        return original(cls, engine, chapter, node, translated_text, *args, **kwargs)
+
+    monkeypatch.setattr(SemanticAssuranceService, "assure_and_commit", classmethod(flaky))
+    db, _ = _run(monkeypatch, tmp_path)
+    first = db.query(NodeModel).filter_by(id="n1").one()
+    assert first.status == "NEEDS_REVIEW"
+    assert first.node_metadata["draft_translation"]["reasons"] == ["COMMIT_REJECTED"]
+    assert db.query(NodeModel).filter_by(id="n2").one().status == "TRANSLATED"

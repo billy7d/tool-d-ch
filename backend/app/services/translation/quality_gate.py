@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set
@@ -110,6 +111,11 @@ MODEL_COMMENTARY = re.compile(
     r"|\bkhông phù hợp với ngữ cảnh\b",
     re.IGNORECASE,
 )
+# Model bỏ dở câu rồi xả dấu câu: "bị đánh đập,, ——..", "tắm rửa cho.. “”..;.?...", "từ “”. Có phải".
+# Trên 908 đoạn đã dịch của sách thật mẫu này bắt 19 đoạn, đọc lại cả 19 đều là rác thật.
+PUNCTUATION_GARBAGE = re.compile(
+    r",\s*,|;;|—\s*—|–\s*–|“\s*”|\.\s*\?|\?\s*\.(?!\.)|(?<!v\.v)(?<!\.)\.\.(?!\.)|[,;:]\s*[.!?](?!\.)"
+)
 # Nguồn đang nói về chính việc dịch hay ghi chú thì các từ trên có thể là nội dung thật.
 COMMENTARY_EXEMPT_SOURCE = re.compile(r"translat|\boriginal\b|\bnote\b|\bverbatim\b", re.IGNORECASE)
 # Từ mượn và đơn vị đã thành thông dụng trong văn viết tiếng Việt.
@@ -119,11 +125,19 @@ VIETNAMESE_LOANWORDS = {
     "menu", "show", "shop", "laptop", "smartphone", "robot", "virus", "vitamin", "protein", "sandwich",
     "hamburger", "cocktail", "selfie", "livestream", "marketing", "startup", "logo", "slogan", "poster",
     "bar", "sofa", "opera", "yoga", "acid", "axit", "ballet", "karaoke", "logic", "ego", "tivi",
-    "electron", "proton", "neutron",
+    "electron", "proton", "neutron", "entropy", "alpha", "beta", "gamma", "delta", "omega",
     "kg", "km", "cm", "mm", "ml", "mg", "kw", "kwh", "mb", "gb", "tb", "kb", "hz", "mhz", "ghz", "ppm",
     "gram", "inch", "feet", "ounce", "pound", "yard", "mile",
     # Viết tắt trong trích dẫn, chú thích.
     "tr", "ed", "eds", "trans", "vol", "pp", "ibid", "etc", "vs",
+    # Tiền tố đo lường viết liền như tiếng Việt vẫn viết ("mili giây", "công nghệ nano") và đơn vị thời gian.
+    "mili", "micro", "nano", "kilo", "mega", "giga", "ms", "ns",
+}
+# Tên ngôn ngữ lập trình/công cụ: trong văn bản kỹ thuật, nguồn hay viết thường ("rust library", "python deployments")
+# còn bản dịch viết hoa đúng tên ("thư viện Rust"); cả hai đều không phải chữ chưa dịch.
+_PROGRAMMING_NAMES = {
+    "python", "rust", "ruby", "java", "perl", "bash", "linux", "docker", "kotlin", "swift", "scala", "haskell",
+    "javascript", "typescript", "golang", "php", "lua", "nodejs", "node", "git", "github", "gitlab",
 }
 
 
@@ -132,6 +146,151 @@ VIETNAMESE_LOANWORDS = {
 # ASCII không thấy biên từ. Chiều ngược lại, trước chữ có dấu tiếng Việt có tối đa 4 chữ cái ("nghi"+"êng",
 # "thuy"+"ết"); từ 5 chữ trở lên là tiếng Anh dính vào trước: lượt sửa câu viết "coldhearted" thành "coldlòng".
 _FUSED_WORD = re.compile(r"\w*(?:(?![A-Za-z0-9_])\w)[A-Za-z]{5,}\w*|\w*[A-Za-z]{5,}(?:(?![A-Za-z0-9_])\w)\w*")
+
+
+_VI_SYLLABLES = re.compile(f"^(?:{_VI_INITIAL}[aeiouy]+(?:ng|nh|ch|c|m|n|p|t)?)+$")
+_LETTER_TOKEN = re.compile(r"[^\W\d_]+", re.UNICODE)
+# Sau NFD: dấu móc của ơ/ư, dấu trăng của ă, dấu hỏi, dấu nặng, cùng chữ đ chỉ có trong chữ Việt.
+_VIETNAMESE_ONLY = re.compile("[đĐ" + "".join(chr(code) for code in (0x031B, 0x0306, 0x0309, 0x0323)) + "]")
+
+
+def _strip_vietnamese_marks(word: str) -> str:
+    decomposed = unicodedata.normalize("NFD", word.replace("đ", "d").replace("Đ", "D"))
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn").lower()
+
+
+def _malformed_words(source_text: str, text: str) -> List[str]:
+    """Chữ có dấu tiếng Việt mà không tách được thành các âm tiết tiếng Việt: chữ ngoại dính vào chữ Việt.
+
+    Dịch thử William James: "the Absolute" thành "Đếextrême" mà kiểm chữ dính cũ (cần 5 chữ ASCII liền) bỏ lọt.
+    Phiên âm viết liền ("Giêsu", "Kitô") vẫn tách được thành âm tiết nên không bị bắt. Trên 908 đoạn đã dịch của
+    sách thật, kiểm này bắt 40 chỗ, cả 40 đều là chữ rác ("khôngconscious", "phépiddles").
+    """
+    source = source_text or ""
+    found = []
+    for match in _LETTER_TOKEN.finditer(text or ""):
+        word = match.group(0)
+        if word.isascii() or word in source:
+            continue
+        if not all(unicodedata.normalize("NFD", char)[0].isascii() or char in "đĐ" for char in word):
+            continue  # bộ chữ khác (Hán, Kirin…) do kiểm bộ chữ xử lý
+        if _VI_SYLLABLES.match(_strip_vietnamese_marks(word)) or word in found:
+            continue
+        # Phiên âm tên riêng có thể có cụm phụ âm ("Mátxcơva") nhưng vẫn mang chữ chỉ tiếng Việt mới có (ơ, ư, ă, đ,
+        # dấu hỏi, dấu nặng). Chữ rác là một âm tiết Việt trọn vẹn dính với một chữ ngoại không có các dấu đó.
+        if any(
+            _VI_SYLLABLE.match(_strip_vietnamese_marks(word[:cut]))
+            and not _VIETNAMESE_ONLY.search(unicodedata.normalize("NFD", word[cut:]))
+            for cut in range(1, len(word) - 2)
+        ):
+            found.append(word)
+    return found
+
+
+def _title_like(source_text: str) -> bool:
+    """Nguồn là tiêu đề viết hoa từng chữ ("Miscellaneous Objections to the Theory of Natural Selection")."""
+    source = (source_text or "").strip()
+    # Trích dẫn sách ("* The Prophet (New York: Knopf, 1951)") và lời thoại có tên người không phải tiêu đề.
+    if not source or len(source.split()) > 12 or re.search(r"[\d“”\"]", source) or source.endswith("."):
+        return False
+    words = re.findall(r"[A-Za-z]{4,}", source)
+    return bool(words) and sum(word[0].isupper() for word in words) >= 0.6 * len(words)
+
+
+def _english_common_word(word: str) -> bool:
+    try:
+        from app.services.translation.vocabulary_hints import VocabularyHints
+        return bool(VocabularyHints().senses(word))
+    except Exception:
+        return False
+
+
+_DICTIONARY_PROBE: Optional[bool] = None
+
+
+def _dictionary_ready() -> bool:
+    """Không có từ điển thì mọi từ đều là "không có trong từ điển": luật dựa trên từ điển phải tắt."""
+    global _DICTIONARY_PROBE
+    if _DICTIONARY_PROBE is None:
+        _DICTIONARY_PROBE = _english_common_word("water") and _english_common_word("library")
+    return _DICTIONARY_PROBE
+
+
+# Dấu hiệu đoạn nguồn là văn bản kỹ thuật: code, URL, tên có chữ số (libxml2, V2, HTTP/1.1), camelCase/PascalCase
+# (ElementTree, iPhone; trừ họ người như McDonald), snake_case, C++.
+_TECHNICAL_HINT = re.compile(
+    r"`|https?://|\b[A-Za-z]+\d\w*|\b\w+/\d|\b[a-z]+[A-Z]\w*"
+    r"|\b(?!(?:Mc|Mac|De|Di|Da|Du|La|Le|Van|Von)[A-Z])[A-Z][a-z]+[A-Z][a-z]\w*|\b[a-z]+_\w+|[A-Za-z]\+\+"
+)
+# Khóa tham chiếu của link markdown ("[ASGI specification][asgi]", "[contrib]: https://…") phải giữ nguyên.
+_MARKDOWN_REFERENCE_KEY = re.compile(r"\]\[([^\]\n]+)\]|^\s*\[([^\]\n]+)\]:", re.MULTILINE)
+_LONE_IDENTIFIER = re.compile(r"[a-z][a-z0-9_.+-]*")
+_URL_HOST = re.compile(r"^(?:https?://)?[^/\s]+", re.IGNORECASE)
+
+
+def _technical_document(locked_glossary) -> bool:
+    """Tài liệu loại TECHNICAL: bộ thuật ngữ gate (glossary_validation_terms) mang preset lĩnh vực TECHNICAL.
+
+    Bộ này được truyền giống nhau tới mọi nơi chạy gate (engine, lưu bản dịch, bộ nhớ dịch, QA), nên đây là tín hiệu loại
+    tài liệu duy nhất mà mọi lượt kiểm đều thấy như nhau.
+    """
+    if not isinstance(locked_glossary, (list, tuple)):
+        return False
+    return any(isinstance(entry, dict) and str(entry.get("domain") or "").upper() == "TECHNICAL" for entry in locked_glossary)
+
+
+def _source_identifiers(source_text: str, technical_document: bool = False) -> Set[str]:
+    """Tên thư viện, gói, khóa link trong nguồn mà bản dịch phải giữ nguyên, dù viết thường.
+
+    Dịch thử README của 61 thư viện Python: đoạn đúng bị chặn vì "pydantic", "lxml" (tiêu đề và đầu câu), "libxslt",
+    khóa link "[contrib]". Chữ viết thường không có trong từ điển chỉ được coi là tên khi đoạn nguồn mang dấu hiệu kỹ thuật:
+    sách văn học ("mọi thứ chúng ta cathect") thì chữ không có trong từ điển vẫn là chữ chưa dịch.
+    """
+    source = (source_text or "").strip()
+    found: Set[str] = set()
+    if _LONE_IDENTIFIER.fullmatch(source):
+        # Tiêu đề chỉ có một chữ viết thường là tên gói/lệnh ("pydantic", "requests"); tiêu đề thường viết hoa.
+        found.add(source)
+    for match in _MARKDOWN_REFERENCE_KEY.finditer(source):
+        key = match.group(1) or match.group(2) or ""
+        found.update(word.lower() for word in re.findall(r"[A-Za-z]+", key))
+    technical = technical_document or bool(_TECHNICAL_HINT.search(source))
+    if technical:
+        found.update(word for word in re.findall(r"[a-z]+", source.lower()) if word in _PROGRAMMING_NAMES)
+    if technical and _dictionary_ready():
+        prose = TECHNICAL_TOKEN_PATTERN.sub(" ", URL_PATTERN.sub(" ", source))
+        for word in set(re.findall(r"(?<![\w.-])[a-z]{2,}(?![\w-])", prose)):
+            if word not in ENGLISH_RESIDUE_WORDS and not _english_common_word(word):
+                found.add(word)
+    return found
+
+
+def _beside_name(text: str, start: int, end: int) -> bool:
+    """Từ viết hoa đứng cạnh một từ viết hoa không dấu khác là một phần của tên ("Adam Smith")."""
+    before = re.search(r"([A-Za-z]+)\W*$", text[:start])
+    after = re.match(r"\W*([A-Za-z]+)", text[end:])
+    return any(
+        neighbour and neighbour.group(1)[0].isupper() and not _VI_SYLLABLE.match(neighbour.group(1).lower())
+        for neighbour in (before, after)
+    )
+
+
+def _short_source_expanded(source: str, target: str) -> bool:
+    """Tiêu đề "Entropy and Original Sin" thành tiêu đề cộng cả đoạn giải thích entropy (đã được duyệt ở sách thật).
+
+    Trên 978 đoạn đã dịch (sách thật và dịch thử 7 cuốn), kiểm này bắt 4 đoạn, cả 4 đều là nội dung model tự viết thêm.
+    """
+    if not source or "\n" in source or len(source.split()) > 15:
+        return False
+    lines = [line for line in target.splitlines() if line.strip()]
+    if len(lines) > 1:
+        return True
+    # Tiêu đề một hai từ thành cả câu định nghĩa ("Packfiles" -> "Packfiles là tập tin chứa dữ liệu Git được nén.").
+    # Trên 1.118 cặp đã dịch, không tiêu đề ngắn nào dịch đúng mà dài quá gấp đôi cộng 18 ký tự.
+    is_label = not re.search(r"[.!?…:;”\"’)]$", source)
+    if is_label and len(source.split()) <= 6 and len(target) > len(source) + 25 and len(target) > 2.5 * len(source):
+        return True
+    return len(target) > max(3 * len(source), len(source) + 40)
 
 
 def _fused_words(source_text: str, text: str) -> List[str]:
@@ -147,7 +306,11 @@ def _non_vietnamese_words(source_text: str, text: str, locked_glossary=None) -> 
     prose = _QUOTED_SINGLE_WORD.sub(
         lambda match: " " if match.group(1).lower() in (source_text or "").lower() else match.group(0), prose,
     )
-    source_lower_words = set(re.findall(r"\b[a-z]+\b", source_text or ""))
+    # Tên miền không tính: "Kozea (https://kozea.fr/)" vẫn là tên riêng. Đường dẫn thì vẫn tính, vì chữ link để nguyên
+    # tiếng Anh thường lặp lại đúng đường dẫn đó ("[Contributing to Pydantic](https://docs.pydantic.dev/contributing/)").
+    source_lower_words = set(re.findall(
+        r"\b[a-z]+\b", URL_PATTERN.sub(lambda match: " " + _URL_HOST.sub(" ", match.group(0)), source_text or ""),
+    ))
     allowed = {
         word.lower()
         for _, target, _, variants in GlossaryValidator._entries(locked_glossary or {})
@@ -155,9 +318,14 @@ def _non_vietnamese_words(source_text: str, text: str, locked_glossary=None) -> 
         for word in re.findall(r"[A-Za-z]+", value or "")
     }
     allowed.update(word.lower() for word in _DEFINED_WORD.findall(source_text or ""))
+    allowed.update(_source_identifiers(source_text, _technical_document(locked_glossary)))
+    # Tên lệnh, tên hàm trong code của nguồn (`git svn rebase`) giữ nguyên là đúng, kể cả khi model bỏ dấu `.
+    for span in re.findall(r"`([^`\n]+)`", source_text or ""):
+        allowed.update(word.lower() for word in re.findall(r"[A-Za-z]+", span))
     for phrase in _DEFINED_PHRASE.findall(source_text or ""):
         allowed.update(word.lower() for word in re.findall(r"[A-Za-z]+", phrase))
-    found = list(dict.fromkeys(_fused_words(source_text, prose)))
+    found = list(dict.fromkeys(_fused_words(source_text, prose) + _malformed_words(source_text, prose)))
+    title_like = _title_like(source_text or "")
     for match in _ASCII_WORD.finditer(prose):
         word = match.group(0)
         lower = word.lower()
@@ -169,7 +337,11 @@ def _non_vietnamese_words(source_text: str, text: str, locked_glossary=None) -> 
         if any(char.isupper() for char in word[1:]):
             continue  # viết tắt, số La Mã, camelCase/iPhone
         if word[0].isupper() and lower not in source_lower_words:
-            continue  # tên riêng, tựa sách giữ nguyên ("Freud", "How People Change"); "Strong" đầu câu vẫn bắt
+            # Tiêu đề viết hoa từng chữ: mọi từ đều viết hoa nên không phân biệt được tên riêng theo chữ hoa.
+            # Dịch thử Darwin: "Miscellaneous Objections…" thành "Các Objection Miễn cưỡng" mà gate cho qua.
+            # Khi đó từ có trong từ điển và không đứng cạnh một tên khác thì vẫn là chữ sót.
+            if not (title_like and _english_common_word(lower) and not _beside_name(prose, match.start(), match.end())):
+                continue  # tên riêng, tựa sách giữ nguyên ("Freud", "How People Change"); "Strong" đầu câu vẫn bắt
         if word not in found:
             found.append(word)
     return found
@@ -298,6 +470,19 @@ class TranslationQualityGate:
             if references.unexpected:
                 unexpected_refs = ", ".join(token.raw for token in references.unexpected)
                 issues.append(self._issue("REFERENCE_ADDITION", "ERROR", f"Bản dịch bổ sung tham chiếu không có trong nguồn: {unexpected_refs}"))
+
+            garbage = next((m.group(0) for m in PUNCTUATION_GARBAGE.finditer(target) if m.group(0) not in source), None)
+            if garbage:
+                issues.append(self._issue(
+                    "PUNCTUATION_GARBAGE", "ERROR", f"Bản dịch có chuỗi dấu câu vô nghĩa ({garbage!r}), thường là câu bị bỏ dở.",
+                ))
+
+            if _short_source_expanded(source, target):
+                issues.append(self._issue(
+                    "SHORT_SOURCE_EXPANSION", "ERROR",
+                    "Nguồn chỉ là một dòng ngắn (tiêu đề, nhãn) nhưng bản dịch có nhiều dòng hoặc dài gấp nhiều lần: "
+                    "model đã viết thêm nội dung.",
+                ))
 
             if len(source) > 100:
                 ratio = len(target) / max(len(source), 1)

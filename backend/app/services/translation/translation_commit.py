@@ -29,9 +29,16 @@ class TranslationCommitService:
         semantic_result: Optional[Dict[str, Any]] = None,
         latency_ms: float = 0.0,
         naturalness_result: Optional[Dict[str, Any]] = None,
+        validation_terms: Any = None,
     ):
-        """Lưu node/version/TM/QA/semantic trong một transaction duy nhất."""
-        quality = TranslationQualityGate().validate(node.content, translated_text, locked_glossary or {})
+        """Lưu node/version/TM/QA/semantic trong một transaction duy nhất.
+
+        validation_terms: bộ thuật ngữ gate của engine (gồm thuật ngữ mềm và preset). Gate cuối phải dùng đúng bộ mà
+        lúc dịch đã dùng; lệch nhau thì bản dịch đạt gate lúc dịch lại bị chặn khi lưu và cả lượt dịch dừng lại.
+        """
+        quality = TranslationQualityGate().validate(
+            node.content, translated_text, validation_terms if validation_terms is not None else (locked_glossary or {}),
+        )
         if not quality.passed:
             codes = ", ".join(issue["code"] for issue in quality.issues if issue["severity"] == "ERROR")
             raise ValueError(f"Candidate không qua Quality Gate cuối: {codes}")
@@ -63,7 +70,7 @@ class TranslationCommitService:
                 glossary_hash=signature.glossary_hash,
                 model_name=model_name,
                 prompt_version=signature.prompt_version,
-                locked_glossary=locked_glossary,
+                locked_glossary=validation_terms if validation_terms is not None else locked_glossary,
                 commit=False,
             )
             translation = TranslationRepository(db).save_node_translation(

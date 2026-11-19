@@ -74,7 +74,11 @@ def validate_chapter_memory_response(value: Any) -> Dict[str, Any]:
         raise ValueError("Chapter Memory summary không hợp lệ.")
     if not isinstance(value["tone"], str) or len(value["tone"]) > 500:
         raise ValueError("Chapter Memory tone không hợp lệ.")
-    normalized: Dict[str, Any] = {"summary": value["summary"].strip(), "tone": value["tone"].strip()}
+    # Tóm tắt và giọng văn đi thẳng vào prompt dịch: chữ Hán lẫn trong đó sẽ được model chép lại.
+    normalized: Dict[str, Any] = {
+        "summary": " ".join(_CJK.sub(" ", value["summary"]).split()),
+        "tone": " ".join(_CJK.sub(" ", value["tone"]).split()),
+    }
     for field_name, limit in CHAPTER_MEMORY_LIST_LIMITS.items():
         items = value[field_name]
         if not isinstance(items, list) or len(items) > limit:

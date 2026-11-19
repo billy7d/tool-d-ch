@@ -22,7 +22,9 @@ class HeaderFooterFilter:
             blocks = page.get("blocks", [])
             
             for b in blocks:
-                if b.get("type") != "text":
+                if b.get("type") != "text" or "bbox" not in b:
+                    # EPUB/DOCX/TXT không có toạ độ: bbox mặc định [0,0,0,0] từng làm mọi đoạn bị coi là lề trên,
+                    # nên đoạn ngắn lặp lại ("“Yes.”", "“Well?”") bị xoá khỏi sách như thể là đầu trang.
                     continue
                 text = b.get("text", "").strip()
                 if not text:
@@ -64,7 +66,7 @@ class HeaderFooterFilter:
         standalone_num_pattern = re.compile(r"^\d{1,4}$|^page\s*\d{1,4}$", re.IGNORECASE)
 
         for b in blocks:
-            if b.get("type") != "text":
+            if b.get("type") != "text" or "bbox" not in b:
                 filtered.append(b)
                 continue
 

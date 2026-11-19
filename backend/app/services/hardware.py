@@ -20,6 +20,16 @@ def check_ollama(ollama_url: str = settings.DEFAULT_OLLAMA_URL) -> Dict[str, Any
     return {"running": False, "models": []}
 
 
+def _local_gguf_models() -> List[str]:
+    """Model GGUF tải riêng trong tools/models chạy bằng llama-server, không cần Ollama."""
+    try:
+        from app.services.translation.llama_server_manager import LlamaServerManager
+
+        return LlamaServerManager().local_models()
+    except Exception:
+        return []
+
+
 def check_executable(name: str) -> bool:
     return shutil.which(name) is not None
 
@@ -105,6 +115,7 @@ def detect_hardware_and_env() -> HardwareInfoResponse:
 
     # Ollama
     ollama_info = check_ollama()
+    local_models = _local_gguf_models()
 
     # Tools
     tesseract_available = check_executable("tesseract")
@@ -114,7 +125,7 @@ def detect_hardware_and_env() -> HardwareInfoResponse:
     if gpu_info.get("vram_total_gb") and gpu_info["vram_total_gb"] >= 12:
         recommended_preset = "High Quality (14B-32B Models)"
     elif gpu_info.get("vram_total_gb") and gpu_info["vram_total_gb"] >= 6:
-        recommended_preset = "Balanced (7B-8B Models e.g. Qwen2.5-7B)"
+        recommended_preset = "Balanced (Gemma 4 E4B, hoặc model 7B-8B như Qwen2.5-7B)"
     elif ram_total_gb >= 16:
         recommended_preset = "Balanced CPU/GPU (3B-7B Models)"
     else:
@@ -131,7 +142,7 @@ def detect_hardware_and_env() -> HardwareInfoResponse:
         cuda_available=gpu_info.get("cuda_available", False),
         disk_free_gb=disk_free_gb,
         ollama_running=ollama_info["running"],
-        installed_models=ollama_info["models"],
+        installed_models=local_models + [m for m in ollama_info["models"] if m not in local_models],
         tesseract_available=tesseract_available,
         calibre_available=calibre_available,
         recommended_preset=recommended_preset,

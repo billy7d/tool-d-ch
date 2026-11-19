@@ -90,7 +90,7 @@ class SemanticAssuranceService:
         nodes = db.query(NodeModel).filter_by(project_id=project_id).all()
         return cls.invalidate_for_nodes(
             db, project_id,
-            [node.id for node in nodes if TermMatcher.contains(node.content or "", source_term)],
+            [node.id for node in nodes if TermMatcher.contains_source_term(node.content or "", source_term)],
         )
 
     @classmethod

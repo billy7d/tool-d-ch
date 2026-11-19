@@ -256,7 +256,7 @@ export const Step4Setup: React.FC<Step4SetupProps> = ({ project, hardware, onNex
             >
               {hardware?.installed_models && hardware.installed_models.length > 0 ? (
                 hardware.installed_models.map((m) => (
-                  <option key={m} value={m}>{m}</option>
+                  <option key={m} value={m}>{m === 'gemma-4-E4B-it-Q4_K_M' ? `${m} (Khuyên dùng - nhanh và dịch tốt nhất)` : m}</option>
                 ))
               ) : (
                 <>

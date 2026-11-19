@@ -54,6 +54,21 @@ _EN_NUMBER_WORD = re.compile(
     re.IGNORECASE,
 )
 _EN_PERCENT = re.compile(r"\s+per\s?cent\b", re.IGNORECASE)
+_PERCENT_WORD = re.compile(r"\bper\s?cent\b|%", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[.!?;](?:\s|$)")
+# Tên tháng viết hoa: "the 27th of July, 1694" dịch là "ngày 27 tháng 7 năm 1694" không phải tự thêm số 7.
+_EN_MONTHS = {
+    name: index for index, name in enumerate(
+        ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+         "November", "December"), start=1)
+}
+_EN_MONTH = re.compile(r"\b(" + "|".join(_EN_MONTHS) + r")\b")
+_EN_ORDINALS = {
+    "first": 1, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9,
+    "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14, "fifteenth": 15,
+    "sixteenth": 16, "seventeenth": 17, "eighteenth": 18, "nineteenth": 19, "twentieth": 20, "thirtieth": 30,
+}
+_EN_ORDINAL = re.compile(r"\b(" + "|".join(_EN_ORDINALS) + r")\b", re.IGNORECASE)
 
 
 def spelled_english_numbers(text: str) -> Counter:
@@ -72,7 +87,21 @@ def spelled_english_numbers(text: str) -> Counter:
             value *= _EN_SCALES[match.group("scale").lower()]
         percent = _EN_PERCENT.match(text, match.end())
         values[f"{value}%" if percent else str(value)] += 1
+        if not percent and _percent_later_in_sentence(text, match.end()):
+            # "at forty, and fifty, and sixty percent discount": "percent" áp cho cả dãy, bản dịch ghi "40%, 50%, 60%".
+            values[f"{value}%"] += 1
+    for match in _EN_MONTH.finditer(text or ""):
+        values[str(_EN_MONTHS[match.group(1)])] += 1
+    # "In November of his eighth year" -> "tháng 11 năm 8 tuổi".
+    for match in _EN_ORDINAL.finditer(text or ""):
+        values[str(_EN_ORDINALS[match.group(1).lower()])] += 1
     return values
+
+
+def _percent_later_in_sentence(text: str, position: int) -> bool:
+    rest = (text or "")[position:]
+    end = _SENTENCE_END.search(rest)
+    return bool(_PERCENT_WORD.search(rest[:end.start() if end else len(rest)]))
 
 
 _VI_DIGITS = {1: "một", 2: "hai", 3: "ba", 4: "bốn", 5: "năm", 6: "sáu", 7: "bảy", 8: "tám", 9: "chín"}
@@ -187,5 +216,22 @@ class NumericValidator:
             else:
                 kept.append(token)
         unexpected = kept
+        # Số nhỏ trong nguồn được bản dịch viết bằng chữ ("the 7th Anne" -> "năm thứ bảy của Anne") không phải là thiếu.
+        # Chỉ dùng phần chữ số tiếng Việt chưa ứng với số viết bằng chữ của nguồn.
+        english_spelled = spelled_english_numbers(source_text)
+        spelled_out: Counter = Counter()
+        kept = []
+        for token in missing:
+            key = token.normalized_value
+            if token.percent or token.currency or token.unit or not key.isdigit():
+                kept.append(token)
+                continue
+            if key not in spelled_out:
+                spelled_out[key] = _spelled_in_vietnamese(key, translated_text) - english_spelled[key]
+            if spelled_out[key] > 0:
+                spelled_out[key] -= 1
+            else:
+                kept.append(token)
+        missing = kept
         # Candidate chỉ đạt khi bảo toàn đủ số nguồn và không tự thêm số mới.
         return NumericValidationResult(not missing and not unexpected, missing, unexpected)

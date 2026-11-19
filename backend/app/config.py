@@ -22,7 +22,14 @@ class AppSettings(BaseModel):
     
     # AI Engine defaults
     DEFAULT_OLLAMA_URL: str = "http://localhost:11434"
+    # Model Ollama dự phòng. Dự án mới lấy model mặc định từ model_defaults.default_model() (Gemma 4 khi có file).
     DEFAULT_MODEL: str = "qwen2.5:7b"
+    # llama-server (llama.cpp) chạy cùng file model của Ollama; có thì dùng, không có thì chạy qua Ollama.
+    # TOOL_DICH_BACKEND: auto (mặc định) | ollama.
+    LLAMA_SERVER_PATH: Path = Path(os.environ.get("TOOL_DICH_LLAMA_SERVER") or (BASE_DIR / "tools" / "llama.cpp" / "llama-server.exe"))
+    LLAMA_SERVER_PORT: int = int(os.environ.get("TOOL_DICH_LLAMA_PORT") or 11436)
+    # File GGUF tải riêng (không qua Ollama): tên model là tên file bỏ đuôi .gguf, tìm trong thư mục này và thư mục con.
+    LOCAL_MODELS_DIR: Path = Path(os.environ.get("TOOL_DICH_MODELS_DIR") or (BASE_DIR / "tools" / "models"))
     DEFAULT_TRANSLATION_MODE: str = "NATURAL"
     DEFAULT_QA_LEVEL: str = "BALANCED"
     

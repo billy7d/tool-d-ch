@@ -2,10 +2,12 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Response
 from typing import List
 
 from app.db.engine import get_project_db
-from app.db.models import GlossaryModel, NodeModel
+from app.db.models import GlossaryModel, NodeModel, ProjectModel
 from app.db.repository import GlossaryRepository
 from app.models.schemas import GlossaryItemCreate, GlossaryItemUpdate, GlossaryItemResponse
 from app.services.translation.glossary_service import GlossaryService
+from app.services.translation.model_defaults import default_model
+from app.services.translation.term_consistency import AUTO_CATEGORY, choose_terms
 from app.services.translation.worker import translation_worker
 from app.services.translation.semantic_assurance import SemanticAssuranceService
 
@@ -112,12 +114,39 @@ def delete_glossary_term(project_id: str, term_id: str):
 def auto_extract_glossary(project_id: str):
     db = get_project_db(project_id)
     try:
+        project = db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+        model_name = (project.selected_model if project else None) or default_model()
+        provider = translation_worker.get_provider(model_name)
+        repo = GlossaryRepository(db)
+        if getattr(provider, "json_task", None) is not None:
+            # Quét cả cuốn thay vì 20 đoạn đầu, và chỉ thêm dạng gợi ý MỀM: model 7B đề xuất sai khoảng một phần ba,
+            # nên người dùng duyệt lại trong bảng thuật ngữ; thuật ngữ đã có thì giữ nguyên.
+            rows = db.query(NodeModel.node_type, NodeModel.content).filter(
+                NodeModel.project_id == project_id, NodeModel.node_type.in_(["paragraph", "heading"]),
+            ).order_by(NodeModel.order_index).all()
+            proposed = choose_terms(
+                provider, model_name,
+                [content for node_type, content in rows if node_type == "paragraph" and content],
+                [content for node_type, content in rows if node_type == "heading" and content],
+            )
+            existing = {str(term.source_term).casefold() for term in repo.list_glossary(project_id)}
+            added_count = 0
+            for term in proposed:
+                if term["source_term"].casefold() in existing:
+                    continue
+                repo.add_term(
+                    project_id=project_id, source_term=term["source_term"], target_term=term["target_term"],
+                    category=AUTO_CATEGORY, notes="Gợi ý tự động, cần duyệt lại.", locked=False, lock_level="SOFT",
+                )
+                SemanticAssuranceService.invalidate_for_source_term(db, project_id, term["source_term"])
+                added_count += 1
+            db.commit()
+            return {"message": f"Đã đề xuất {added_count} thuật ngữ dạng gợi ý. Hãy duyệt lại trước khi dịch.", "count": added_count}
+
         nodes = db.query(NodeModel).filter(NodeModel.project_id == project_id).limit(20).all()
         sample_text = "\n".join([n.content for n in nodes])
-        provider = translation_worker.get_provider("qwen2.5:7b")
         extracted = provider.extract_glossary(sample_text)
 
-        repo = GlossaryRepository(db)
         added_count = 0
         for term in extracted:
             src = term.get("source_term", "").strip()

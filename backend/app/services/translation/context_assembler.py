@@ -171,7 +171,7 @@ class ContextAssembler:
     def filter_relevant_glossary(source_text: str, glossary: Dict[str, str]) -> Dict[str, str]:
         relevant: Dict[str, str] = {}
         for source, target in (glossary or {}).items():
-            if TermMatcher.contains(source_text, source):
+            if TermMatcher.contains_source_term(source_text, source):
                 relevant[source] = target
         return relevant
 
@@ -253,7 +253,7 @@ class ContextAssembler:
             preferred = str(
                 entry.get("preferred_target") or entry.get("target_term") or entry.get("target") or ""
             ).strip()
-            if not source_term or not TermMatcher.contains(source_text, source_term) or not preferred:
+            if not source_term or not TermMatcher.contains_source_term(source_text, source_term) or not preferred:
                 continue
             normalized_entry = dict(entry)
             normalized_entry["source_term"] = source_term

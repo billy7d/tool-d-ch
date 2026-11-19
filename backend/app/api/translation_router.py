@@ -15,6 +15,7 @@ from app.services.translation.translation_memory import TranslationMemoryService
 from app.services.translation.contextual_engine import ContextualTranslationEngine
 from app.services.translation.node_policy import is_translatable_node_type
 from app.services.translation.translation_config import TranslationConfig
+from app.services.translation.model_defaults import default_model
 from app.services.translation.translation_signature import (
     PROMPT_VERSION,
     build_translation_signature_from_config,
@@ -34,7 +35,7 @@ def start_translation(project_id: str, payload: TranslationStartRequest):
         db.close()
         raise HTTPException(status_code=404, detail="Không tìm thấy dự án.")
 
-    model_to_use = payload.model_name or proj.selected_model or "qwen2.5:7b"
+    model_to_use = payload.model_name or proj.selected_model or default_model()
     try:
         PromptBuilder.validate_custom_instructions(payload.custom_instructions or proj.custom_instructions)
     except ValueError as exc:
