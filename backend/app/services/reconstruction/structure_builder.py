@@ -18,6 +18,12 @@ from app.services.reconstruction.header_footer_filter import HeaderFooterFilter
 from app.services.reconstruction.page_break_joiner import join_chapter_nodes
 
 
+def _layout_extra(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Thông tin bố cục (căn lề, thơ, thụt lề) do bộ chuyển PDF -> ebook gắn vào khối, giữ lại cho bộ ghi ebook."""
+    layout = block.get("layout")
+    return {"layout": dict(layout)} if layout else {}
+
+
 class StructureBuilder:
     CHAPTER_PATTERNS = [
         re.compile(r"^(?:CHAPTER|Chapter|Ch\.)\s+([0-9IVXLCDM]+|[A-Za-z]+)(?:\s*[:\.\-—]\s*(.*))?$", re.IGNORECASE),
@@ -29,18 +35,23 @@ class StructureBuilder:
     FOOTNOTE_PATTERN = re.compile(r"^(?:\[([0-9]{1,3})\]|\*|\†|([0-9]{1,3})\.)\s+(.*)$")
 
     @classmethod
-    def detect_chapter_heading(cls, text: str, font_size: float, is_bold: bool, base_font_size: float = 11.0) -> Optional[Tuple[str, str, int]]:
+    def detect_chapter_heading(
+        cls, text: str, font_size: float, is_bold: bool, base_font_size: float = 11.0, strict_patterns: bool = False
+    ) -> Optional[Tuple[str, str, int]]:
         """
         Returns (chapter_number, chapter_title, level) if text is detected as a chapter start.
+        strict_patterns: mẫu "1. Tiêu đề"/"Chapter X" chỉ tính khi dòng nổi bật (đậm, to hơn hoặc viết hoa),
+        để mục danh sách đánh số trong thân bài không mở chương mới.
         """
         text_clean = text.strip()
         if not text_clean or len(text_clean) > 150:
             return None
 
+        prominent = is_bold or font_size >= base_font_size * 1.1 or text_clean.isupper()
         # Check regex patterns
         for pattern in cls.CHAPTER_PATTERNS:
             m = pattern.match(text_clean)
-            if m:
+            if m and (prominent or not strict_patterns):
                 num = m.group(1) if len(m.groups()) >= 1 else ""
                 title = m.group(2) if len(m.groups()) >= 2 and m.group(2) else text_clean
                 return (num, title, 1)
@@ -75,13 +86,21 @@ class StructureBuilder:
         filename: str,
         pages_data: List[Dict[str, Any]],
         assets_data: List[Dict[str, Any]],
-        source_toc: List[Dict[str, Any]] = None
+        source_toc: List[Dict[str, Any]] = None,
+        detect_chapters_by_style: bool = True,
+        preserve_block_order: bool = False,
+        filter_headers_footers: bool = True,
+        strict_chapter_patterns: bool = False,
+        join_page_breaks: bool = True,
     ) -> CanonicalDocument:
         """
         Reconstructs the hierarchical Canonical Document Model from extracted pages.
+
+        Các tùy chọn dành cho bộ chuyển PDF -> ebook (đã tự dọn đầu/chân trang, sắp thứ tự đọc và lấy chương
+        từ mục lục PDF): mặc định giữ nguyên cách làm của luồng dịch.
         """
         # Step 1: Filter repeated headers/footers
-        repeated_hf = HeaderFooterFilter.identify_repeated_headers_footers(pages_data)
+        repeated_hf = HeaderFooterFilter.identify_repeated_headers_footers(pages_data) if filter_headers_footers else set()
 
         # Calculate base font size mode
         font_sizes = []
@@ -110,7 +129,7 @@ class StructureBuilder:
                     level=1,
                     source_pages=list(set(current_chapter_pages)),
                     order_index=chapter_idx - 1,
-                    nodes=join_chapter_nodes(current_chapter_nodes)
+                    nodes=join_chapter_nodes(current_chapter_nodes) if join_page_breaks else current_chapter_nodes
                 ))
                 chapter_idx += 1
                 current_chapter_nodes = []
@@ -123,10 +142,12 @@ class StructureBuilder:
             raw_blocks = p_data.get("blocks", [])
 
             # Filter headers and footers
-            filtered_blocks = HeaderFooterFilter.filter_blocks(raw_blocks, repeated_hf, page_height)
+            filtered_blocks = (
+                HeaderFooterFilter.filter_blocks(raw_blocks, repeated_hf, page_height) if filter_headers_footers else list(raw_blocks)
+            )
             
             # Sort reading order
-            sorted_blocks = ParagraphRepair.sort_reading_order(filtered_blocks, page_width)
+            sorted_blocks = filtered_blocks if preserve_block_order else ParagraphRepair.sort_reading_order(filtered_blocks, page_width)
 
             page_has_heading = False
             for b in sorted_blocks:
@@ -197,7 +218,7 @@ class StructureBuilder:
                             type=NodeType.HEADING,
                             content=cleaned_text,
                             source_mapping=source_mapping,
-                            metadata=NodeMetadata(heading_level=min(level, 4), is_bold=True, confidence=confidence),
+                            metadata=NodeMetadata(heading_level=min(level, 4), is_bold=True, confidence=confidence, extra=_layout_extra(b)),
                             order_index=node_counter,
                         ))
                     else:
@@ -221,7 +242,10 @@ class StructureBuilder:
                 font_name = b.get("font_name", "")
 
                 # Check if Chapter Start
-                chapter_match = cls.detect_chapter_heading(cleaned_text, font_size, is_bold, base_font_size)
+                chapter_match = (
+                    cls.detect_chapter_heading(cleaned_text, font_size, is_bold, base_font_size, strict_patterns=strict_chapter_patterns)
+                    if detect_chapters_by_style else None
+                )
                 if chapter_match:
                     # Finalize previous chapter if it has content
                     if current_chapter_nodes:
@@ -240,7 +264,8 @@ class StructureBuilder:
                             font_size=font_size,
                             font_weight="bold" if is_bold else "normal",
                             is_bold=is_bold,
-                            confidence=confidence
+                            confidence=confidence,
+                            extra=_layout_extra(b),
                         ),
                         order_index=node_counter,
                     ))
@@ -261,7 +286,8 @@ class StructureBuilder:
                             font_size=font_size,
                             font_weight="bold" if is_bold else "normal",
                             is_bold=is_bold,
-                            confidence=confidence
+                            confidence=confidence,
+                            extra=_layout_extra(b),
                         ),
                         order_index=node_counter,
                     ))
@@ -271,8 +297,12 @@ class StructureBuilder:
 
                 # Check if Footnote
                 fn_match = cls.FOOTNOTE_PATTERN.match(cleaned_text)
-                if fn_match and (bbox[1] > page_height * 0.75 or font_size < base_font_size * 0.9):
-                    fn_num = fn_match.group(1) or fn_match.group(2) or "*"
+                if b.get("footnote") or (fn_match and (bbox[1] > page_height * 0.75 or font_size < base_font_size * 0.9)):
+                    if fn_match:
+                        fn_num = fn_match.group(1) or fn_match.group(2) or "*"
+                    else:
+                        lead = re.match(r"\W*(\d{1,3})", cleaned_text)
+                        fn_num = lead.group(1) if lead else "*"
                     node_id = f"footnote_{chapter_idx:04d}_{node_counter:05d}"
                     current_chapter_nodes.append(DocumentNode(
                         id=node_id,
@@ -282,7 +312,8 @@ class StructureBuilder:
                         metadata=NodeMetadata(
                             footnote_number=fn_num,
                             font_size=font_size,
-                            confidence=confidence
+                            confidence=confidence,
+                            extra=_layout_extra(b),
                         ),
                         order_index=node_counter,
                     ))
@@ -302,7 +333,8 @@ class StructureBuilder:
                         font_name=font_name,
                         is_bold=is_bold,
                         is_italic=is_italic,
-                        confidence=confidence
+                        confidence=confidence,
+                        extra=_layout_extra(b),
                     ),
                     order_index=node_counter,
                 ))

@@ -12,12 +12,13 @@ import { Step6QAEditor } from './pages/Step6QAEditor';
 import { Step7Layout } from './pages/Step7Layout';
 import { Step8Export } from './pages/Step8Export';
 import { SettingsPage } from './pages/SettingsPage';
+import { ConvertPage } from './pages/ConvertPage';
 import { apiClient } from './api/client';
 import { Project, HardwareInfo } from './types';
 
 export const App: React.FC = () => {
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
-  const [activeView, setActiveView] = useState<'dashboard' | 'workflow' | 'settings'>('dashboard');
+  const [activeView, setActiveView] = useState<'dashboard' | 'workflow' | 'settings' | 'convert'>('dashboard');
   const [currentStep, setCurrentStep] = useState<number>(1);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
 
@@ -121,6 +122,8 @@ export const App: React.FC = () => {
                 hardware={hardware}
               />
             )}
+
+            {activeView === 'convert' && <ConvertPage />}
 
             {activeView === 'settings' && (
               <SettingsPage

@@ -34,4 +34,13 @@ class ExportValidator:
             except Exception as e:
                 return False, f"Không thể đọc file EPUB: {e}"
 
+        elif expected_format.lower() == "mobi":
+            try:
+                with open(file_path, "rb") as f:
+                    header = f.read(68)
+                    if len(header) < 68 or header[60:68] != b"BOOKMOBI":
+                        return False, "File MOBI không hợp lệ (thiếu nhãn BOOKMOBI)."
+            except Exception as e:
+                return False, f"Không thể đọc file MOBI: {e}"
+
         return True, "Hợp lệ"

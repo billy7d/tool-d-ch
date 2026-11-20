@@ -11,6 +11,8 @@ import {
   SemanticReview,
   EntityDecision,
   StyleRule,
+  ConvertOptionsInfo,
+  ConversionJob,
 } from '../types';
 
 const api = axios.create({
@@ -140,4 +142,18 @@ export const apiClient = {
   // Export
   exportDocument: (projectId: string, data: any) =>
     api.post(`/projects/${projectId}/export`, data).then((r) => r.data),
+
+  // Chuyển thẳng PDF -> EPUB/MOBI (không dịch)
+  getConvertOptions: () => api.get<ConvertOptionsInfo>('/convert/options').then((r) => r.data),
+  startConversion: (formData: FormData, onUploadProgress?: (percent: number) => void) =>
+    api
+      .post<ConversionJob>('/convert', formData, {
+        onUploadProgress: (e) => {
+          if (onUploadProgress && e.total) onUploadProgress(Math.round((e.loaded / e.total) * 100));
+        },
+      })
+      .then((r) => r.data),
+  getConversionJob: (jobId: string) => api.get<ConversionJob>(`/convert/jobs/${jobId}`).then((r) => r.data),
+  listConversions: () => api.get<ConversionJob[]>('/convert/jobs').then((r) => r.data),
+  deleteConversion: (jobId: string) => api.delete(`/convert/jobs/${jobId}`).then((r) => r.data),
 };

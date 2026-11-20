@@ -285,6 +285,8 @@ class ExportRequest(BaseModel):
     title: Optional[str] = None
     translator: Optional[str] = "Antigravity Local AI"
     include_cover: bool = True
+    # Dòng máy Kindle cho EPUB/MOBI (cỡ ảnh, bìa): kindle | kindle_pw | kindle_hd.
+    device_profile: Optional[str] = None
 
 
 class ExportResponse(BaseModel):

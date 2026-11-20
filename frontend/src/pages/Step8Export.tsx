@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Download,
   FileText,
@@ -10,7 +10,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { apiClient } from '../api/client';
-import { Project, HardwareInfo } from '../types';
+import { Project, HardwareInfo, ConvertDevice } from '../types';
 
 interface Step8ExportProps {
   project: Project;
@@ -23,6 +23,18 @@ export const Step8Export: React.FC<Step8ExportProps> = ({ project, hardware, onR
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [exportedFilename, setExportedFilename] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [devices, setDevices] = useState<ConvertDevice[]>([]);
+  const [device, setDevice] = useState<string>('kindle_pw');
+
+  useEffect(() => {
+    apiClient
+      .getConvertOptions()
+      .then((data) => {
+        setDevices(data.devices);
+        setDevice(data.default_device);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const handleExport = async (format: 'pdf' | 'epub' | 'mobi') => {
     setError(null);
@@ -33,6 +45,7 @@ export const Step8Export: React.FC<Step8ExportProps> = ({ project, hardware, onR
       const res = await apiClient.exportDocument(project.id, {
         format,
         title: project.title,
+        device_profile: device,
       });
       setDownloadUrl(res.download_url);
       setExportedFilename(`${project.title}.${format}`);
@@ -52,6 +65,24 @@ export const Step8Export: React.FC<Step8ExportProps> = ({ project, hardware, onR
           Tất cả định dạng xuất bản đều được tạo từ <strong>Một Canonical Document Model duy nhất</strong>. Đảm bảo văn bản Unicode chuẩn tiếng Việt, hình ảnh chất lượng cao và mục lục tự động điều chỉnh theo số trang mới.
         </p>
       </div>
+
+      {/* Kindle device for EPUB/MOBI */}
+      {devices.length > 0 && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 bg-slate-900 border border-slate-800 rounded-2xl px-5 py-3">
+          <span className="text-xs font-semibold text-slate-300 shrink-0">Dòng máy Kindle (EPUB/MOBI):</span>
+          <select
+            value={device}
+            onChange={(e) => setDevice(e.target.value)}
+            className="flex-1 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:border-sky-500 outline-none"
+          >
+            {devices.map((d) => (
+              <option key={d.key} value={d.key}>
+                {d.label} — {d.description}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* Export Format Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -94,7 +125,7 @@ export const Step8Export: React.FC<Step8ExportProps> = ({ project, hardware, onR
             </div>
             <h3 className="font-bold text-white text-base">Ebook EPUB (EPUB3)</h3>
             <p className="text-slate-400 text-xs leading-relaxed">
-              Định dạng sách điện tử chuẩn quốc tế, tự co giãn chữ (reflowable) tương thích Apple Books, Google Play Books, Kobo, Boox.
+              Khuyên dùng cho KOReader trên Kindle: chữ co giãn, mục lục nhiều cấp, ảnh nhúng sẵn, không ép font nên chữ Việt luôn đủ dấu. Cũng đọc tốt trên Kobo, Boox, Apple Books.
             </p>
           </div>
 
@@ -125,13 +156,13 @@ export const Step8Export: React.FC<Step8ExportProps> = ({ project, hardware, onR
             </div>
             <h3 className="font-bold text-white text-base">MOBI (Kindle Legacy)</h3>
             <p className="text-slate-400 text-xs leading-relaxed">
-              Định dạng dành cho các dòng máy đọc sách Kindle đời cũ (yêu cầu máy có cài đặt Calibre).
+              MOBI 6 cổ điển cho trình đọc gốc của Kindle đời cũ; KOReader cũng mở được.
             </p>
-            {hardware && !hardware.calibre_available && (
-              <span className="text-[11px] text-amber-400/90 block">
-                Chưa phát hiện Calibre trên máy. Bạn nên ưu tiên xuất định dạng EPUB.
-              </span>
-            )}
+            <span className="text-[11px] text-amber-400/90 block">
+              {hardware?.calibre_available
+                ? 'Đã có Calibre: MOBI được tạo bằng Calibre.'
+                : 'Không cần Calibre: dùng bộ ghi MOBI tích hợp sẵn.'}
+            </span>
           </div>
 
           <button

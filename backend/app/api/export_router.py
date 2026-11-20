@@ -6,14 +6,27 @@ from datetime import datetime
 
 from app.db.engine import get_project_db
 from app.db.models import LayoutProfileModel, ExportModel
-from app.db.repository import StructureRepository
+from app.db.repository import DocumentRepository, StructureRepository
 from app.models.schemas import ExportRequest, ExportResponse
 from app.services.project_manager import ProjectFileManager
 from app.services.exporter.pdf_exporter import PDFExporter
 from app.services.exporter.epub_exporter import EPUBExporter
 from app.services.exporter.mobi_exporter import MOBIExporter
+from app.services.ebook.devices import get_device
+from app.services.ebook.pdf_layout import render_pdf_cover
 
 router = APIRouter(prefix="/api/projects/{project_id}/export", tags=["Export"])
+
+
+def _source_cover(db, project_id: str, device: str):
+    """Bìa ebook lấy từ trang 1 của PDF gốc, chỉ khi trang đó là ảnh bìa (không lấy trang chữ tiếng Anh)."""
+    try:
+        for source in DocumentRepository(db).get_source_documents(project_id):
+            if (source.file_format or "").lower() == "pdf" and Path(source.file_path).exists():
+                return render_pdf_cover(Path(source.file_path), get_device(device), require_image=True)
+    except Exception:
+        return None
+    return None
 
 
 @router.post("", response_model=ExportResponse)
@@ -53,12 +66,18 @@ def export_document(project_id: str, payload: ExportRequest):
         if fmt == "pdf":
             out_file = export_dir / f"{safe_title}_{export_id[:8]}.pdf"
             PDFExporter.export_pdf(doc, profile, out_file)
-        elif fmt == "epub":
-            out_file = export_dir / f"{safe_title}_{export_id[:8]}.epub"
-            EPUBExporter.export_epub(doc, out_file)
-        elif fmt == "mobi":
-            out_file = export_dir / f"{safe_title}_{export_id[:8]}.mobi"
-            MOBIExporter.export_mobi(doc, out_file)
+        elif fmt in ("epub", "mobi"):
+            out_file = export_dir / f"{safe_title}_{export_id[:8]}.{fmt}"
+            ebook_meta = {
+                "title": doc.metadata.title,
+                "author": doc.metadata.author,
+                "translator": doc.metadata.translator,
+            }
+            cover = _source_cover(db, project_id, payload.device_profile) if payload.include_cover else None
+            if fmt == "epub":
+                EPUBExporter.export_epub(doc, out_file, metadata=ebook_meta, device=payload.device_profile, cover_image=cover)
+            else:
+                MOBIExporter.export_mobi(doc, out_file, metadata=ebook_meta, device=payload.device_profile, cover_image=cover)
         else:
             raise HTTPException(status_code=400, detail=f"Định dạng xuất '{fmt}' không được hỗ trợ.")
 

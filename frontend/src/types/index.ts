@@ -302,3 +302,64 @@ export interface StyleRule {
   occurrences: number;
   status: 'CANDIDATE' | 'ACTIVE' | 'DISABLED';
 }
+
+// Chuyển PDF -> EPUB/MOBI cho KOReader trên Kindle cũ
+export interface ConvertDevice {
+  key: string;
+  label: string;
+  description: string;
+  screen_width: number;
+  screen_height: number;
+}
+
+export interface ConvertFormatInfo {
+  key: 'epub' | 'mobi';
+  label: string;
+  description: string;
+  recommended?: boolean;
+}
+
+export interface ConvertOptionsInfo {
+  formats: ConvertFormatInfo[];
+  devices: ConvertDevice[];
+  default_device: string;
+  calibre_available: boolean;
+  tesseract_available: boolean;
+  max_upload_mb: number;
+}
+
+export interface ConversionResultInfo {
+  output_format: 'epub' | 'mobi';
+  engine: 'builtin' | 'calibre';
+  title: string;
+  author: string;
+  language: string;
+  device: string;
+  page_count: number;
+  chapter_count: number;
+  toc_entries: number;
+  paragraph_count: number;
+  image_count: number;
+  scanned_pages: number;
+  ocr_pages: number;
+  paragraph_style: 'indent' | 'block';
+  outline_used: boolean;
+  file_size_bytes: number;
+  warnings: string[];
+}
+
+export interface ConversionJob {
+  id: string;
+  filename: string;
+  output_format: 'epub' | 'mobi';
+  device: string;
+  status: 'queued' | 'running' | 'done' | 'error';
+  progress: number;
+  stage: string;
+  error?: string | null;
+  created_at: number;
+  finished_at?: number | null;
+  output_name?: string | null;
+  download_url?: string | null;
+  result?: ConversionResultInfo | null;
+}

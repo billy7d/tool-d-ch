@@ -17,6 +17,7 @@ from app.api.glossary_router import router as glossary_router
 from app.api.qa_router import router as qa_router
 from app.api.layout_router import router as layout_router
 from app.api.export_router import router as export_router
+from app.api.convert_router import router as convert_router
 from app.api.system_router import router as system_router
 from app.api.events_router import router as events_router
 from app.api.entities_router import router as entities_router
@@ -58,6 +59,7 @@ app.include_router(glossary_router)
 app.include_router(qa_router)
 app.include_router(layout_router)
 app.include_router(export_router)
+app.include_router(convert_router)
 app.include_router(system_router)
 app.include_router(events_router)
 app.include_router(entities_router)
