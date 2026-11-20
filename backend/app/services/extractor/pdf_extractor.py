@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
@@ -12,6 +13,34 @@ except ImportError:
 
 from app.services.extractor.scan_detector import ScanDetector, PageType
 from app.services.extractor.ocr_engine import OCREngine
+
+
+# PyMuPDF span flags: bit 0 = superscript, bit 1 = italic, bit 2 = serifed,
+# bit 3 = monospaced, bit 4 = bold.
+SPAN_FLAG_ITALIC = 2
+SPAN_FLAG_BOLD = 16
+
+# A block counts as bold/italic only when this share of its non-space characters
+# has the style, so one emphasised word does not restyle a whole paragraph.
+BLOCK_STYLE_MAJORITY = 0.6
+
+_BOLD_FONT_NAME = re.compile(r"bold", re.IGNORECASE)
+_ITALIC_FONT_NAME = re.compile(r"italic|oblique", re.IGNORECASE)
+# Adobe-style italic suffix: "MinionPro-It", "MinionPro-BoldIt" (case-sensitive on purpose).
+_ITALIC_FONT_SUFFIX = re.compile(r"-(?:[A-Z][a-z]*)?It$")
+
+
+def span_style(span: Dict[str, Any]) -> Tuple[bool, bool]:
+    """Returns (is_bold, is_italic) for one PyMuPDF text span."""
+    flags = span.get("flags", 0) or 0
+    font = span.get("font", "") or ""
+    is_bold = bool(flags & SPAN_FLAG_BOLD) or bool(_BOLD_FONT_NAME.search(font))
+    is_italic = (
+        bool(flags & SPAN_FLAG_ITALIC)
+        or bool(_ITALIC_FONT_NAME.search(font))
+        or bool(_ITALIC_FONT_SUFFIX.search(font))
+    )
+    return is_bold, is_italic
 
 
 class PDFExtractor:
@@ -140,8 +169,9 @@ class PDFExtractor:
                         block_text_parts = []
                         font_sizes = []
                         font_names = []
-                        is_bold = False
-                        is_italic = False
+                        styled_chars = 0
+                        bold_chars = 0
+                        italic_chars = 0
 
                         for line in block.get("lines", []):
                             line_text_parts = []
@@ -151,12 +181,14 @@ class PDFExtractor:
                                     line_text_parts.append(stext)
                                     font_sizes.append(span.get("size", 11.0))
                                     font_names.append(span.get("font", ""))
-                                    flags = span.get("flags", 0)
-                                    if flags & 2 or "Bold" in span.get("font", ""):
-                                        is_bold = True
-                                    if flags & 1 or "Italic" in span.get("font", ""):
-                                        is_italic = True
-                            
+                                    span_bold, span_italic = span_style(span)
+                                    n_chars = sum(1 for ch in stext if not ch.isspace())
+                                    styled_chars += n_chars
+                                    if span_bold:
+                                        bold_chars += n_chars
+                                    if span_italic:
+                                        italic_chars += n_chars
+
                             line_text = "".join(line_text_parts)
                             if line_text:
                                 block_text_parts.append(line_text)
@@ -164,6 +196,8 @@ class PDFExtractor:
                         full_text = " ".join(block_text_parts).strip()
                         avg_font_size = sum(font_sizes) / len(font_sizes) if font_sizes else 11.0
                         dom_font = font_names[0] if font_names else "Default"
+                        is_bold = styled_chars > 0 and bold_chars / styled_chars >= BLOCK_STYLE_MAJORITY
+                        is_italic = styled_chars > 0 and italic_chars / styled_chars >= BLOCK_STYLE_MAJORITY
 
                         if full_text:
                             page_blocks.append({
