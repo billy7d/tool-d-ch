@@ -10,6 +10,7 @@ import shutil
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -151,6 +152,7 @@ class ConversionJobManager:
         return self._executor.submit(self._run, job, options)
 
     def _output_name(self, title: str, fmt: str) -> str:
+        title = unicodedata.normalize("NFC", title)  # "Tư Duy" tách dấu thành "Tu_ Duy" nếu không dựng sẵn
         safe = "".join(ch if (ch.isalnum() or ch in " -_.,()") else "_" for ch in title).strip(" ._") or "sach"
         return f"{safe[:120]}.{fmt}"
 

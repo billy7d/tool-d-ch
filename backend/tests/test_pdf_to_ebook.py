@@ -225,7 +225,9 @@ def test_epub_container_is_valid_for_old_readers(epub_file):
         # Không ép font/cỡ chữ tuyệt đối để KOReader tùy chỉnh được.
         assert "font-family" not in css.replace("font-family: monospace", "")
         assert not re.search(r"\d(pt|px)\b", css.replace("1px solid", ""))
-    assert result.outline_used is True
+    # Mục lục PDF chỉ 2 mục không đủ làm khung chương (calibre hay ghi "Bìa", "Mục lục"): chương lấy theo tiêu đề,
+    # mục lục điều hướng vẫn đúng hai chương (xem test_epub_keeps_layout_details).
+    assert result.outline_used is False
     assert result.paragraph_style == "indent"
 
 
@@ -396,3 +398,19 @@ def test_convert_api_runs_job_and_serves_file(book_pdf):
     assert client.post("/api/convert", files={"file": ("notes.txt", b"hello", "text/plain")}).status_code == 400
     assert client.delete(f"/api/convert/jobs/{job_id}").status_code == 200
     assert client.get(f"/api/convert/jobs/{job_id}").status_code == 404
+
+
+def test_decomposed_vietnamese_names_are_composed(tmp_path):
+    """Tên file chép từ macOS/điện thoại ở dạng tách dấu (NFD) từng thành "Tu_ Duy Đa__t Cu_o__c.epub"."""
+    from app.services.ebook.jobs import ConversionJobManager
+
+    nfd = unicodedata.normalize("NFD", "Tư Duy Đặt Cược")
+    assert ConversionJobManager()._output_name(nfd, "epub") == "Tư Duy Đặt Cược.epub"
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 100), "A short page of text for the title test.", fontsize=12)
+    pdf = tmp_path / "upload.pdf"
+    doc.save(str(pdf))
+    result = convert_pdf_to_ebook(pdf, tmp_path / "out.epub", tmp_path / "work",
+                                  ConversionOptions(source_name=nfd + ".pdf", cover=False))
+    assert result.title == "Tư Duy Đặt Cược"

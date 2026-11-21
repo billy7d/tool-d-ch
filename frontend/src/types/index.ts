@@ -325,6 +325,7 @@ export interface ConvertOptionsInfo {
   default_device: string;
   calibre_available: boolean;
   tesseract_available: boolean;
+  ocr_languages?: string[];
   max_upload_mb: number;
 }
 

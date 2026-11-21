@@ -30,6 +30,8 @@ class AppSettings(BaseModel):
     LLAMA_SERVER_PORT: int = int(os.environ.get("TOOL_DICH_LLAMA_PORT") or 11436)
     # File GGUF tải riêng (không qua Ollama): tên model là tên file bỏ đuôi .gguf, tìm trong thư mục này và thư mục con.
     LOCAL_MODELS_DIR: Path = Path(os.environ.get("TOOL_DICH_MODELS_DIR") or (BASE_DIR / "tools" / "models"))
+    # Tesseract OCR (bản Windows UB Mannheim bung ra tools/tesseract, kèm tessdata/). Không có thì tìm trên PATH.
+    TESSERACT_PATH: Path = Path(os.environ.get("TOOL_DICH_TESSERACT") or (BASE_DIR / "tools" / "tesseract" / "tesseract.exe"))
     DEFAULT_TRANSLATION_MODE: str = "NATURAL"
     DEFAULT_QA_LEVEL: str = "BALANCED"
     

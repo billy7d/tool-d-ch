@@ -382,8 +382,33 @@ class _PlanBuilder:
         if not self.files:
             self.files.append(PlanFile(key="part0001", blocks=[PlanBlock(kind="para", html="", classes=("noindent",))]))
 
+    @staticmethod
+    def _clean_toc_entries(entries):
+        """Bỏ mục rác khỏi mục lục điều hướng: chữ vỡ từ hình vẽ ("< > »"), và các dòng của trang "Mục lục" in sẵn
+        trong sách (tiêu đề kết thúc bằng số trang, đứng thành chuỗi liền nhau)."""
+        def letters_ok(text: str) -> bool:
+            letters = sum(1 for ch in text if ch.isalpha())
+            return letters >= 3 and letters >= 0.5 * len(text.replace(" ", ""))
+
+        entries = [e for e in entries if letters_ok(e[1])]
+        numbered = [bool(re.search(r"\s\d{1,4}\W?$", e[1])) for e in entries]
+        keep = [True] * len(entries)
+        start = 0
+        while start < len(entries):
+            if not numbered[start]:
+                start += 1
+                continue
+            end = start
+            while end < len(entries) and numbered[end]:
+                end += 1
+            if end - start >= 3:
+                for index in range(start, end):
+                    keep[index] = False
+            start = end
+        return [e for e, k in zip(entries, keep) if k]
+
     def toc(self, title: str) -> List[TocNode]:
-        entries = [e for e in self.toc_entries if e[1].strip()]
+        entries = self._clean_toc_entries([e for e in self.toc_entries if e[1].strip()])
         valid_keys = {f.key for f in self.files}
         entries = [e for e in entries if e[2] in valid_keys]
         if not entries:

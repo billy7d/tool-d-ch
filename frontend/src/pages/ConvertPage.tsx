@@ -24,6 +24,8 @@ const formatBytes = (bytes: number) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+const OCR_LANG_LABEL: Record<string, string> = { vie: 'tiếng Việt', eng: 'tiếng Anh' };
+
 const STATUS_LABEL: Record<ConversionJob['status'], string> = {
   queued: 'Đang chờ',
   running: 'Đang chuyển',
@@ -440,6 +442,12 @@ export const ConvertPage: React.FC = () => {
             <p>Sách tiếng Việt: nếu trình đọc gốc của Kindle hiện sai dấu với file MOBI, hãy mở bằng KOReader (có sẵn font đủ dấu).</p>
             {options && !options.tesseract_available && (
               <p className="text-amber-300/80">Máy chưa cài Tesseract OCR: trang scan (không có lớp chữ) sẽ được giữ dạng ảnh cả trang.</p>
+            )}
+            {options?.tesseract_available && (
+              <p className="text-emerald-300/80">
+                Trang scan (ảnh, không có lớp chữ) được nhận dạng thành chữ bằng Tesseract OCR
+                {options.ocr_languages?.length ? ` (${options.ocr_languages.map((l) => OCR_LANG_LABEL[l] || l).join(', ')})` : ''}, rồi dàn lại như sách thường.
+              </p>
             )}
           </div>
 

@@ -118,7 +118,10 @@ def detect_hardware_and_env() -> HardwareInfoResponse:
     local_models = _local_gguf_models()
 
     # Tools
-    tesseract_available = check_executable("tesseract")
+    from app.services.extractor.ocr_engine import find_tesseract
+
+    # tools/tesseract (bản bung sẵn, không cần cài vào Windows) hoặc tesseract trên PATH.
+    tesseract_available = find_tesseract() is not None
     calibre_available = check_executable("ebook-convert")
 
     # Recommendation heuristic

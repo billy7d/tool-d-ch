@@ -18,6 +18,7 @@ _MEDIA_TYPES = {"epub": "application/epub+zip", "mobi": "application/x-mobipocke
 
 @router.get("/options")
 def conversion_options():
+    ocr = OCREngine()
     return {
         "formats": [
             {"key": "epub", "label": "EPUB", "recommended": True,
@@ -28,7 +29,8 @@ def conversion_options():
         "devices": list_devices(),
         "default_device": DEFAULT_DEVICE,
         "calibre_available": bool(calibre_executable()),
-        "tesseract_available": OCREngine().is_available,
+        "tesseract_available": ocr.is_available,
+        "ocr_languages": sorted(lang for lang in ocr.available_languages() if lang != "osd"),
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
     }
 

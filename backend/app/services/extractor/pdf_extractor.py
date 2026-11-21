@@ -116,16 +116,19 @@ class PDFExtractor:
             # If SCANNED_PAGE or MIXED_PAGE with poor text, perform selective OCR
             if page_type in (PageType.SCANNED_PAGE, PageType.MIXED_PAGE) and char_count < 100 and self.ocr_engine.is_available:
                 # Render high-res image for OCR
-                pix = page.get_pixmap(dpi=300)
+                pix = page.get_pixmap(dpi=300, colorspace=fitz.csGRAY)
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
-                ocr_blocks = self.ocr_engine.ocr_image(img)
-                
+                ocr_blocks = self.ocr_engine.ocr_image(img, dpi=300)
+                # Toạ độ OCR tính theo pixel ở 300 dpi; đổi về point như khối chữ của trang thường
+                # (bộ lọc đầu/chân trang và sắp thứ tự đọc so với chiều cao trang tính theo point).
+                ocr_scale = 72.0 / 300.0
+
                 for ob_idx, ob in enumerate(ocr_blocks):
                     page_blocks.append({
                         "block_id": ob_idx,
                         "type": "text",
                         "text": ob["text"],
-                        "bbox": ob["bbox"],
+                        "bbox": [v * ocr_scale for v in ob["bbox"]],
                         "font_size": 11.0,
                         "font_name": "OCR_Detected",
                         "is_bold": False,

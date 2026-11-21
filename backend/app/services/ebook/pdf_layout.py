@@ -16,12 +16,15 @@ Kết quả là danh sách trang/khối cùng định dạng StructureBuilder đ
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import io
+import os
 import re
 import statistics
 import unicodedata
 from collections import Counter, defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -43,7 +46,7 @@ from app.services.ebook.text_cleanup import (
     finalize_text,
     strip_markers,
 )
-from app.services.extractor.ocr_engine import OCREngine
+from app.services.extractor.ocr_engine import OCREngine, OcrPage
 from app.services.extractor.scan_detector import PageType, ScanDetector
 from app.services.reconstruction.page_break_joiner import continues_sentence
 
@@ -58,6 +61,13 @@ _HYPHEN_COMPOUND_RE = re.compile(r"([^\W\d_]+)-([^\W\d_]+)")
 _LINE_HYPHEN_RE = re.compile(r"([^\W\d_]+)-$")
 _SENTENCE_END_RE = re.compile(r"[.!?…:;][\"'’”»)\]*†‡]*\d{0,3}$")
 _PAGE_NUMBER_RE = re.compile(r"^(?:(?:page|trang)\s*)?(?:#|[ivxlcdm]{1,7})$|^[-–—\s]*#[-–—\s]*$|^#\s*(?:of|/|trên)\s*#$", re.I)
+# Đầu trang kiểu "46 | TÊN SÁCH" / "TÊN CHƯƠNG | 47"; OCR hay đọc số trang thành I, l, J, ?, §.
+_FOLIO_HEAD_RE = re.compile(
+    r"^\W{0,3}[\dIlJ?§$]{1,4}\s*[|•·]\s*\S|\S\s*[|•·]\s*[\dIlJ?§$]{1,4}\W{0,3}$"
+    r"|^\W{0,3}\S{0,4}\s*\|\s*\S|\S\s*\|\s*\S{0,4}\W{0,3}$"  # vạch ngăn cạnh số trang OCR đọc sai ("š0 |", "| 8ï")
+)
+_LINE_BREAK = chr(10)
+_PAGE_REF_END_RE = re.compile(r"\s[\dIl]{1,4}\s*$")
 _SCENE_BREAK_RE = re.compile(r"^[\s*•·~#⁂◆◇✦✧❖○●□■=_—–-]{1,24}$")
 _SUP_TEXT_RE = re.compile(r"^[\d*†‡§,\-–\s]{1,6}$")
 _FOOTNOTE_START_RE = re.compile(r"^(?:[\x01\x02][bis])*\s*(?:\d{1,3}|[*†‡§])")
@@ -75,6 +85,7 @@ class Span:
     bold: bool = False
     italic: bool = False
     sup: bool = False
+    word_confidences: Optional[List[float]] = None  # chữ OCR: độ tin cậy từng từ (0..1)
 
 
 @dataclass
@@ -148,6 +159,7 @@ class PageLayout:
     char_count: int = 0
     scanned: bool = False
     ocr_used: bool = False
+    needs_ocr: bool = False
 
 
 @dataclass
@@ -294,6 +306,7 @@ class _Unit:
     quote: bool = False
     heading_level: int = 0
     heading_like: bool = False
+    toc_entry: bool = False  # dòng của trang "Mục lục" in sẵn trong sách
     footnote: bool = False
     ocr: bool = False
     first_in_segment: bool = False
@@ -304,7 +317,7 @@ class _Unit:
     def joinable(self) -> bool:
         return (
             self.kind == "text" and self.body and not self.align and not self.verse and not self.scene
-            and not self.heading_level and not self.heading_like and not self.footnote
+            and not self.heading_level and not self.heading_like and not self.footnote and not self.toc_entry
         )
 
 
@@ -351,6 +364,17 @@ def _keep_hyphen(a: str, b: str, vocab, hyphen_vocab) -> bool:
     if b.lower() in _JOIN_SUFFIXES:
         return False
     return len(a) >= 2 and len(b) >= 3 and a.lower() in vocab and b.lower() in vocab
+
+
+_OCR_BULLET_RE = re.compile(r"^(?:e|®|©|«|°|¢|o)\s+(\S)")
+
+
+def _fix_ocr_bullet(text: str) -> str:
+    """Dấu đầu dòng "•" mà OCR đọc thành "e", "®", "«"... ("e FoxSports.com: ..." -> "• FoxSports.com: ...")."""
+    match = _OCR_BULLET_RE.match(text)
+    if match and (match.group(1)[0].isupper() or match.group(1)[0] in "“\"'"):
+        return "• " + text[match.start(1):]
+    return text
 
 
 def _ends_sentence(text: str) -> bool:
@@ -430,21 +454,13 @@ class PdfLayoutAnalyzer:
         self.author_override = (author or "").strip() or None
         self.source_name = (source_name or "").strip() or None
         self.progress = progress or (lambda fraction, message: None)
-        self.ocr = OCREngine(lang=self._ocr_lang())
+        self.ocr = OCREngine(lang="eng")
+        self.ocr_lang = ""
+        self.spell_fixes = 0
         self.body_size = 11.0
         self.pitch = 13.0
         self.vocab: set = set()
         self.hyphen_vocab: set = set()
-
-    @staticmethod
-    def _ocr_lang() -> str:
-        try:
-            import pytesseract
-
-            langs = set(pytesseract.get_languages(config=""))
-            return "eng+vie" if "vie" in langs else "eng"
-        except Exception:
-            return "eng"
 
     # ---- Trích xuất ---------------------------------------------------------------------------
 
@@ -481,13 +497,13 @@ class PdfLayoutAnalyzer:
             path.write_bytes(data)
         return ImageItem(path, (x0, y0, x1, y1), width, height, digest)
 
-    def _extract_page(self, page, number: int) -> PageLayout:
-        rect = page.rect
-        layout = PageLayout(number=number, width=rect.width, height=rect.height)
-        data = page.get_text("dict", flags=_TEXT_FLAGS)
+    def _read_blocks(self, page, layout: PageLayout, with_images: bool) -> int:
+        """Đọc khối chữ (và ảnh nếu cần) của trang vào layout.items. Trả về số từ."""
+        flags = _TEXT_FLAGS if with_images else (_TEXT_FLAGS & ~pymupdf.TEXT_PRESERVE_IMAGES)
+        data = page.get_text("dict", flags=flags)
+        layout.items = []
+        layout.char_count = 0
         words = 0
-        image_area = 0.0
-        image_count = 0
         for block in data.get("blocks", []):
             if block.get("type") == 0:
                 lines = []
@@ -501,13 +517,13 @@ class PdfLayoutAnalyzer:
                         if not text:
                             continue
                         font = raw.get("font", "") or ""
-                        flags = int(raw.get("flags", 0) or 0)
+                        flags_ = int(raw.get("flags", 0) or 0)
                         spans.append(Span(
                             text=text,
                             size=float(raw.get("size", 0.0) or 0.0),
-                            bold=bool(flags & 16) or bool(_BOLD_FONT.search(font)),
-                            italic=bool(flags & 2) or bool(_ITALIC_FONT.search(font)),
-                            sup=bool(flags & 1),
+                            bold=bool(flags_ & 16) or bool(_BOLD_FONT.search(font)),
+                            italic=bool(flags_ & 2) or bool(_ITALIC_FONT.search(font)),
+                            sup=bool(flags_ & 1),
                         ))
                     line_text = "".join(s.text for s in spans).strip()
                     if not line_text:
@@ -518,55 +534,288 @@ class PdfLayoutAnalyzer:
                     words += len(line_text.split())
                 if lines:
                     layout.items.append(TextBlock(lines))
-            elif block.get("type") == 1:
-                image_count += 1
-                r = pymupdf.Rect(block.get("bbox", (0, 0, 0, 0))) & rect
-                image_area += max(0.0, r.width) * max(0.0, r.height)
-                if self.include_images:
-                    item = self._extract_image(page, block)
-                    if item:
-                        layout.items.append(item)
+            elif block.get("type") == 1 and with_images:
+                item = self._extract_image(page, block)
+                if item:
+                    layout.items.append(item)
+        return words
+
+    def _extract_page(self, page, number: int) -> PageLayout:
+        rect = page.rect
+        layout = PageLayout(number=number, width=rect.width, height=rect.height)
+        try:
+            image_infos = page.get_image_info()  # chỉ toạ độ, không giải mã ảnh
+        except Exception:
+            image_infos = []
+        image_area = 0.0
+        for info in image_infos:
+            r = pymupdf.Rect(info.get("bbox", (0, 0, 0, 0))) & rect
+            image_area += max(0.0, r.width) * max(0.0, r.height)
+        words = self._read_blocks(page, layout, with_images=False)
 
         page_area = rect.width * rect.height or 1.0
-        page_type = ScanDetector.classify_page(layout.char_count, words, image_count, image_area / page_area, page_area)
+        page_type = ScanDetector.classify_page(layout.char_count, words, len(image_infos), image_area / page_area, page_area)
         if page_type == PageType.SCANNED_PAGE and layout.char_count < 60:
-            self._handle_scanned_page(page, layout)
+            # Trang scan: không trích ảnh scan (rất nặng với ảnh 600 dpi); OCR song song sau khi đọc hết trang.
+            layout.needs_ocr = True
+            return layout
+        if image_infos and self.include_images:
+            # Trang có cả chữ và ảnh: đọc lại kèm ảnh để giữ đúng thứ tự ảnh giữa các khối chữ.
+            self._read_blocks(page, layout, with_images=True)
         return layout
 
-    def _handle_scanned_page(self, page, layout: PageLayout) -> None:
-        if self.ocr.is_available:
-            try:
-                pix = page.get_pixmap(dpi=300)
-                image = Image.open(io.BytesIO(pix.tobytes("png")))
-                ocr_blocks = self.ocr.ocr_image(image)
-            except Exception:
-                ocr_blocks = []
-            if ocr_blocks:
-                scale = 72.0 / 300.0
-                lines = []
-                for ob in ocr_blocks:
-                    text = clean_span_text(ob.get("text", "")).strip()
-                    bbox = ob.get("bbox") or [0, 0, 0, 0]
-                    if not text:
-                        continue
-                    x0, y0, x1, y1 = (v * scale for v in bbox)
-                    lines.append(Line([Span(text, size=max(6.0, (y1 - y0)))], x0, y0, x1, y1))
-                if lines:
-                    layout.items = [TextBlock(lines, ocr=True)]
-                    layout.char_count = sum(len(l.text) for l in lines)
-                    layout.ocr_used = True
-                    return
-        # Không OCR được: giữ nguyên trang dưới dạng ảnh xám vừa màn hình để không mất nội dung.
+    def _keep_scan_image(self, page, layout: PageLayout) -> None:
+        """Không OCR được: giữ nguyên trang dưới dạng ảnh xám vừa màn hình để không mất nội dung."""
+        layout.needs_ocr = False
         try:
             side = self.device.image_max_side
             data = render_page_image(page, side, side, gray=True)
         except Exception:
+            layout.items = []
             return
         digest = hashlib.md5(data).hexdigest()
         path = self.image_dir / f"scan_{layout.number:05d}.png"
         path.write_bytes(data)
         layout.items = [ImageItem(path, (0, 0, layout.width, layout.height), 0, 0, digest, scan=True)]
         layout.scanned = True
+
+    # ---- OCR trang scan -----------------------------------------------------------------------
+
+    @staticmethod
+    def _ocr_dpi(page) -> int:
+        """300 dpi (chuẩn của Tesseract); trang khổ lớn thì hạ xuống để ảnh không quá ~35 megapixel."""
+        area_in2 = (page.rect.width / 72.0) * (page.rect.height / 72.0)
+        limit = (35_000_000 / max(area_in2, 1e-6)) ** 0.5
+        return int(max(150, min(300, limit)))
+
+    @staticmethod
+    def _render_for_ocr(page, dpi: int) -> Image.Image:
+        """Ảnh xám của trang (render ở luồng chính; mã hóa PNG để ở luồng OCR cho song song)."""
+        pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False)
+        return Image.frombytes("L", (pix.width, pix.height), pix.samples)
+
+    def _choose_ocr_lang(self, doc, pages: Sequence[PageLayout], pending: Sequence[PageLayout], catalog_lang: str) -> str:
+        """Một ngôn ngữ cho cả sách: ghép "vie+eng" chậm hơn mà lại nhận sai nhiều hơn chỉ dùng "vie"."""
+        installed = self.ocr.available_languages()
+        to_tess = {"vi": "vie", "en": "eng"}
+
+        def usable(code: str) -> Optional[str]:
+            code = to_tess.get(code, code)
+            return code if code in installed else None
+
+        forced = (self.language_override or catalog_lang or "").split("-")[0].lower()
+        if forced and usable(forced):
+            return usable(forced)
+        text_pages = [p for p in pages if not p.needs_ocr and p.char_count > 200]
+        if text_pages:
+            samples = [it.text for p in text_pages[:40] for it in p.items if isinstance(it, TextBlock)]
+            return usable(detect_language(samples, default="en")) or "eng"
+        if "vie" not in installed:
+            return "eng"
+        # Sách toàn ảnh scan: OCR thử một trang giữa sách bằng "eng+vie" rồi chọn theo dấu tiếng Việt.
+        probe = pending[len(pending) // 2]
+        try:
+            page = doc[probe.number - 1]
+            dpi = self._ocr_dpi(page)
+            result = self.ocr.recognize_image(self._render_for_ocr(page, dpi), "eng+vie", dpi)
+            return "vie" if detect_language([result.text], default="en") == "vi" else "eng"
+        except Exception:
+            return "eng"
+
+    def _ocr_figures(self, layout: PageLayout, blocks: Sequence[TextBlock], im: Image.Image, dpi: int) -> List[ImageItem]:
+        """Hình minh họa trên trang scan: khoảng trống lớn giữa các đoạn chữ mà vẫn có nhiều điểm tối."""
+        width, height = im.size
+        scale = dpi / 72.0
+        x_lo = int(min(b.bbox[0] for b in blocks) * scale)
+        x_hi = int(max(b.bbox[2] for b in blocks) * scale)
+        if x_hi - x_lo < width * 0.3:
+            x_lo, x_hi = int(width * 0.08), int(width * 0.92)
+        intervals = sorted((b.bbox[1] * scale, b.bbox[3] * scale) for b in blocks)
+        merged: List[List[float]] = []
+        for y0, y1 in intervals:
+            if merged and y0 <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], y1)
+            else:
+                merged.append([y0, y1])
+        top, bottom = height * 0.06, height * 0.94
+        gaps, cursor = [], top
+        for y0, y1 in merged:
+            if y0 - cursor >= 0.10 * height:
+                gaps.append((cursor, min(y0, bottom)))
+            cursor = max(cursor, y1)
+        if bottom - cursor >= 0.10 * height:
+            gaps.append((cursor, bottom))
+
+        figures: List[ImageItem] = []
+        for index, (g0, g1) in enumerate(gaps):
+            region = im.crop((x_lo, int(g0), x_hi, int(g1)))
+            mask = region.point(lambda v: 255 if v < 140 else 0)
+            dark = mask.histogram()[255] / max(1, region.width * region.height)
+            box = mask.getbbox()
+            if dark < 0.03 or dark > 0.9 or not box:
+                continue
+            if box[2] - box[0] < 0.15 * width or box[3] - box[1] < 0.05 * height:
+                continue
+            pad = 8
+            crop_box = (max(0, box[0] - pad), max(0, box[1] - pad),
+                        min(region.width, box[2] + pad), min(region.height, box[3] + pad))
+            crop = region.crop(crop_box)
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG", optimize=True)
+            data = buf.getvalue()
+            path = self.image_dir / f"ocrfig_{layout.number:05d}_{index}.png"
+            path.write_bytes(data)
+            bbox = (
+                (x_lo + crop_box[0]) / scale, (g0 + crop_box[1]) / scale,
+                (x_lo + crop_box[2]) / scale, (g0 + crop_box[3]) / scale,
+            )
+            figures.append(ImageItem(path, bbox, crop.width, crop.height, hashlib.md5(data).hexdigest()))
+        return figures
+
+    def _apply_ocr(self, doc, layout: PageLayout, result: Optional[OcrPage], image: Image.Image, dpi: int) -> None:
+        if result is not None:
+            scale = 72.0 / dpi
+            blocks: List[TextBlock] = []
+            for paragraph in result.paragraphs:
+                lines = []
+                for ocr_line in paragraph.lines:
+                    text = _fix_ocr_bullet(clean_span_text(ocr_line.text).strip())
+                    if not text or ocr_line.confidence < 0.4:
+                        continue  # chữ "nhận" nhầm trong ảnh, vết bẩn
+                    alnum = sum(1 for ch in text if ch.isalnum())
+                    if alnum < 3 and not text.strip(" .").isdigit() or alnum < 0.4 * len(text.replace(" ", "")):
+                        continue  # vạch trang trí đọc thành ký hiệu ("\" ˆ LẠ")
+                    x0, y0, x1, y1 = (v * scale for v in ocr_line.bbox)
+                    confidences = ocr_line.word_confidences if len(ocr_line.word_confidences) == len(text.split()) else None
+                    lines.append(Line([Span(text, size=max(5.0, ocr_line.x_size * scale), word_confidences=confidences)],
+                                      x0, y0, x1, y1))
+                if lines:
+                    blocks.append(TextBlock(lines, ocr=True))
+            chars = sum(len(l.text) for b in blocks for l in b.lines)
+            confidence = result.mean_confidence
+            # Trang ít chữ (trang tên phần "PHẦN I") vẫn nhận chữ nếu OCR rất chắc chắn.
+            if (chars >= 20 and confidence >= 0.5) or (chars >= 2 and confidence >= 0.8):
+                items: list = list(blocks)
+                if self.include_images:
+                    for figure in self._ocr_figures(layout, blocks, image, dpi):
+                        position = next((i for i, it in enumerate(items) if it.bbox[1] > figure.bbox[1]), len(items))
+                        items.insert(position, figure)
+                layout.items = items
+                layout.char_count = chars
+                layout.ocr_used = True
+                layout.needs_ocr = False
+                return
+        # Trang gần như không có chữ (ảnh, hình vẽ) hoặc OCR quá kém: giữ ảnh cả trang.
+        self._keep_scan_image(doc[layout.number - 1], layout)
+
+    @staticmethod
+    def _confident_ocr_words(blocks: Sequence[TextBlock]) -> set:
+        """Chữ sách dùng >= 3 lần mà lần nào Tesseract cũng chấm cao ("xèng" trong sách về poker): chữ có thật của
+        sách dù từ điển ít gặp. Lỗi lặp lại do phông chữ ("điểu", "tổn") luôn có lần bị chấm thấp hơn."""
+        confidences: Dict[str, List[float]] = defaultdict(list)
+        for block in blocks:
+            for line in block.lines:
+                for span in line.spans:
+                    words = span.text.split()
+                    if not span.word_confidences or len(words) != len(span.word_confidences):
+                        continue
+                    for word, conf in zip(words, span.word_confidences):
+                        token = "".join(ch for ch in word.lower() if ch.isalpha())
+                        if token:
+                            confidences[token].append(conf)
+        return {
+            token for token, values in confidences.items()
+            if len(values) >= 3 and sum(values) / len(values) >= 0.92 and min(values) >= 0.88
+        }
+
+    def _spell_check_ocr(self, pages: Sequence[PageLayout]) -> None:
+        """Sửa lỗi dấu tiếng Việt sau OCR theo ngữ cảnh (xem vi_spell). Chạy trên dòng OCR, trước khi dựng đoạn."""
+        if not self.ocr_lang.startswith("vie"):
+            return
+        ocr_blocks = [it for p in pages for it in p.items if isinstance(it, TextBlock) and it.ocr]
+        if not ocr_blocks:
+            return
+        from app.services.ebook.vi_spell import OcrSpellCorrector, VietSyllableModel, lowercase_stray_capitals
+
+        self.progress(0.705, "Sửa lỗi dấu sau OCR")
+        model = VietSyllableModel.shared()
+        if not model.unigrams:
+            return  # không có từ điển Anh-Việt (data/dictionaries/en-vi): không đủ căn cứ để sửa dấu
+        all_blocks = [it for p in pages for it in p.items if isinstance(it, TextBlock)]
+        corrector = OcrSpellCorrector(
+            model, (_LINE_BREAK.join(l.text for l in b.lines) for b in all_blocks),
+            confident_words=self._confident_ocr_words(ocr_blocks),
+        )
+        sizes = sorted(l.size for b in ocr_blocks for l in b.lines)
+        median = sizes[len(sizes) // 2] if sizes else 0.0
+        for block in ocr_blocks:
+            lines = [l for l in block.lines if len(l.spans) == 1]
+            if not lines:
+                continue
+            heading = all(l.size >= 1.12 * median for l in lines)
+            texts = [lowercase_stray_capitals(l.spans[0].text, model) for l in lines]
+            confidences: Optional[List[float]] = []
+            for line, text in zip(lines, texts):
+                word_confs = line.spans[0].word_confidences
+                if confidences is not None and word_confs and len(word_confs) == len(text.split()):
+                    confidences.extend(word_confs)
+                else:
+                    confidences = None
+            fixed = corrector.correct_tokens(_LINE_BREAK.join(texts), heading=heading,
+                                             confidences=confidences).split(_LINE_BREAK)
+            if len(fixed) != len(lines):
+                continue
+            for line, text in zip(lines, fixed):
+                line.spans[0].text = text
+        self.spell_fixes = sum(corrector.changes.values())
+
+    def _run_ocr(self, doc, pages: Sequence[PageLayout], catalog_lang: str) -> None:
+        """OCR các trang scan song song: luồng chính render (PyMuPDF không an toàn đa luồng), mỗi luồng phụ
+        chạy một tiến trình tesseract 1 luồng. Nhanh gấp ~5 lần để Tesseract tự chia luồng trên từng trang."""
+        pending = [p for p in pages if p.needs_ocr]
+        if not pending:
+            return
+        if not self.ocr.is_available:
+            for layout in pending:
+                self._keep_scan_image(doc[layout.number - 1], layout)
+            return
+        self.ocr_lang = self._choose_ocr_lang(doc, pages, pending, catalog_lang)
+        workers = max(1, min(len(pending), os.cpu_count() or 2))
+        single_thread = len(pending) > 1
+        total = len(pending)
+        completed = 0
+        inflight: Dict[object, Tuple[PageLayout, Image.Image, int]] = {}
+
+        def collect() -> None:
+            nonlocal completed
+            finished, _ = wait(list(inflight), return_when=FIRST_COMPLETED)
+            for future in finished:
+                layout, image, dpi = inflight.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    print(f"[OCR] trang {layout.number}: {exc}")
+                    result = None
+                self._apply_ocr(doc, layout, result, image, dpi)
+                completed += 1
+                self.progress(0.3 + 0.4 * completed / total, f"Nhận dạng chữ (OCR) trang {completed}/{total}")
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ocr") as pool:
+            for layout in pending:
+                page = doc[layout.number - 1]
+                dpi = self._ocr_dpi(page)
+                try:
+                    image = self._render_for_ocr(page, dpi)
+                except Exception:
+                    self._keep_scan_image(page, layout)
+                    completed += 1
+                    continue
+                future = pool.submit(self.ocr.recognize_image, image, self.ocr_lang, dpi, single_thread)
+                inflight[future] = (layout, image, dpi)
+                while len(inflight) >= workers * 2:
+                    collect()
+            while inflight:
+                collect()
 
     # ---- Thống kê toàn sách -----------------------------------------------------------------
 
@@ -580,8 +829,10 @@ class PdfLayoutAnalyzer:
                             weights[round(s.size * 2) / 2] += len(s.text.strip())
         return float(weights.most_common(1)[0][0]) if weights else 11.0
 
-    def _is_body_size(self, size: float) -> bool:
-        return abs(size - self.body_size) <= 0.12 * self.body_size
+    def _is_body_size(self, size: float, ocr: bool = False) -> bool:
+        # Cỡ chữ OCR (x_size) dao động theo chữ trong dòng: "màu xám." chỉ có chữ thấp nên bị ước lượng 9,9pt
+        # khi thân bài 12pt. Trang có lớp chữ thì cỡ chữ chính xác, giữ ngưỡng chặt.
+        return abs(size - self.body_size) <= (0.22 if ocr else 0.12) * self.body_size
 
     def _body_lines(self, blocks: Sequence[TextBlock]) -> List[Line]:
         return [
@@ -656,20 +907,59 @@ class PdfLayoutAnalyzer:
 
     # ---- Dọn trang ----------------------------------------------------------------------------
 
+    @staticmethod
+    def _split_margin_lines(pages: Sequence[PageLayout]) -> None:
+        """Tách dòng đầu/cuối của khối nếu nó nằm ở lề trên/dưới và cách phần còn lại một khoảng trống.
+
+        Tesseract hay gộp đầu trang ("46 | TƯ DUY ĐẶT CƯỢC") vào cùng đoạn với các dòng thân bài ngay dưới,
+        khiến bộ lọc đầu trang (chỉ xét khối ngắn) bỏ sót và dòng đầu trang bị nối vào giữa câu.
+        """
+        for page in pages:
+            top, bottom = page.height * 0.12, page.height * 0.88
+            new_items: list = []
+            for item in page.items:
+                if not isinstance(item, TextBlock) or len(item.lines) < 2:
+                    new_items.append(item)
+                    continue
+                lines = list(item.lines)
+                head = tail = None
+                first, second = lines[0], lines[1]
+                height = max(1.0, first.y1 - first.y0)
+                if first.y1 <= top and second.y0 - first.y1 >= 0.5 * height:
+                    head = lines.pop(0)
+                if len(lines) >= 2:
+                    last, before = lines[-1], lines[-2]
+                    height = max(1.0, last.y1 - last.y0)
+                    if last.y0 >= bottom and last.y0 - before.y1 >= 0.5 * height:
+                        tail = lines.pop()
+                if head:
+                    new_items.append(TextBlock([head], ocr=item.ocr))
+                new_items.append(TextBlock(lines, ocr=item.ocr))
+                if tail:
+                    new_items.append(TextBlock([tail], ocr=item.ocr))
+            page.items = new_items
+
     def _remove_running_heads(self, pages: Sequence[PageLayout]) -> int:
-        """Bỏ đầu trang/chân trang lặp lại và số trang. Trả về số khối đã bỏ."""
+        """Bỏ đầu trang/chân trang lặp lại và số trang. Trả về số khối đã bỏ.
+
+        So khớp gần đúng theo "khung chữ" (bỏ dấu, bỏ số, bỏ ký hiệu): trên trang scan, OCR đọc cùng một đầu
+        trang thành "TƯ DUY ĐẶT CƯỢC", "TƯ DUY ĐẶT tƯỢt", "TƯ DUY BẬT CUýt"... nên so khớp chính xác bỏ sót.
+        """
 
         def margin_key(text: str) -> str:
             key = re.sub(r"\d+", "#", text.lower())
             key = re.sub(r"\s+", " ", key)
             return key.strip(" .·•|-–—")
 
-        candidates = []  # (page, block, key, text)
-        pages_by_key: Dict[str, List[int]] = defaultdict(list)
-        exact_count: Counter = Counter()
+        def skeleton(text: str) -> str:
+            text = unicodedata.normalize("NFD", text.replace("đ", "d").replace("Đ", "D"))
+            return "".join(ch for ch in text.lower() if "a" <= ch <= "z")
+
+        self._split_margin_lines(pages)
+        candidates = []  # (page, block, zone, text, skeleton)
         for page in pages:
             for item in page.items:
-                if not isinstance(item, TextBlock) or item.ocr:
+                if not isinstance(item, TextBlock):
                     continue
                 x0, y0, x1, y1 = item.bbox
                 in_margin = y1 <= page.height * 0.12 or y0 >= page.height * 0.88
@@ -678,24 +968,43 @@ class PdfLayoutAnalyzer:
                 text = item.text.strip()
                 if not text or len(text) > 150 or item.size > self.body_size * 1.5:
                     continue
-                key = margin_key(text)
                 zone = "top" if y1 <= page.height * 0.12 else "bottom"
-                candidates.append((page, item, f"{zone}:{key}", text))
-                pages_by_key[f"{zone}:{key}"].append(page.number)
-                exact_count[(zone, text)] += 1
+                candidates.append((page, item, zone, text, skeleton(text)))
+
+        # Gom cụm theo khung chữ giống nhau >= 75%.
+        clusters: List[dict] = []
+        membership: Dict[int, dict] = {}
+        for index, (page, item, zone, text, skel) in enumerate(candidates):
+            if len(skel) < 3:
+                continue
+            found = None
+            for cluster in clusters:
+                if cluster["zone"] == zone and abs(len(cluster["skel"]) - len(skel)) <= max(3, len(skel) // 3):
+                    if difflib.SequenceMatcher(None, cluster["skel"], skel, autojunk=False).ratio() >= 0.75:
+                        found = cluster
+                        break
+            if found is None:
+                found = {"zone": zone, "skel": skel, "pages": set()}
+                clusters.append(found)
+            found["pages"].add(page.number)
+            membership[index] = found
 
         removed = 0
         total_pages = max(1, len(pages))
-        for page, item, key, text in candidates:
-            bare = key.split(":", 1)[1]
-            numbers = sorted(set(pages_by_key[key]))
-            adjacent = sum(1 for a, b in zip(numbers, numbers[1:]) if b - a <= 2)
+        for index, (page, item, zone, text, skel) in enumerate(candidates):
+            size_limit = 1.5 if item.ocr else 1.15
+            bare = margin_key(text)
             is_page_number = bool(_PAGE_NUMBER_RE.match(bare)) and item.size <= self.body_size * 1.5
+            # "46 | TƯ DUY ĐẶT CƯỢC", "MUỐN CƯỢC KHÔNG? | 47": số trang (OCR có thể đọc thành "I0", "?8") cạnh vạch ngăn.
+            is_folio_head = bool(_FOLIO_HEAD_RE.search(text)) and len(text.split()) <= 20
+            cluster = membership.get(index)
+            numbers = sorted(cluster["pages"]) if cluster else []
+            adjacent = sum(1 for a, b in zip(numbers, numbers[1:]) if b - a <= 2)
             is_running = (
-                len(numbers) >= 3 and item.size <= self.body_size * 1.15
+                len(numbers) >= 3 and item.size <= self.body_size * size_limit
                 and (adjacent >= 2 or len(numbers) >= 0.25 * total_pages)
             )
-            if is_page_number or is_running:
+            if is_page_number or is_folio_head or is_running:
                 if item in page.items:
                     page.items.remove(item)
                     removed += 1
@@ -864,14 +1173,23 @@ class PdfLayoutAnalyzer:
         em = self.body_size
         short_limit = 2.0 * em if style.justify else 0.25 * (m.right - m.left)
         groups: List[List[Line]] = [[lines[0]]]
+        # Khối giống trang "Mục lục" in sẵn: nhiều dòng kết thúc bằng số trang căn phải (dòng nào cũng "đầy").
+        page_refs = sum(1 for l in lines if _PAGE_REF_END_RE.search(l.text))
+        toc_like = page_refs >= 3 and page_refs >= 0.4 * len(lines)
         for prev, line in zip(lines, lines[1:]):
             same_row = abs(line.y0 - prev.y0) < 0.4 * em
             indent = line.x0 - m.left
             prev_indent = prev.x0 - m.left
             prev_short = prev.x1 < m.right - short_limit
             new_paragraph = False
-            if same_row:
+            hanging = (
+                prev.text.lstrip().startswith(("•", "-", "–", "*")) and not prev_short
+                and 0 < line.x0 - prev.x0 <= 3 * em
+            )
+            if same_row or hanging:
                 new_paragraph = False
+            elif line.text.lstrip().startswith("•") or (toc_like and _PAGE_REF_END_RE.search(prev.text)):
+                new_paragraph = True
             elif style.indent and 0.5 * em <= indent <= 6 * em and (abs(indent - prev_indent) > 0.3 * em or prev_short):
                 new_paragraph = True
             elif prev_short and _ends_sentence(prev.text) and not line.all_sup:
@@ -918,7 +1236,7 @@ class PdfLayoutAnalyzer:
             segment=segment,
             para=para,
             size=size,
-            body=self._is_body_size(size),
+            body=self._is_body_size(size, ocr=ocr),
             align=align,
             verse=verse,
             indented=0.5 * em <= first_indent <= 6 * em,
@@ -938,6 +1256,11 @@ class PdfLayoutAnalyzer:
         if unit.body and bold >= 0.9 and len(lines) == 1 and len(visible.split()) <= 15:
             # Dòng đậm ngắn cỡ chữ thường thường là tiêu đề mục: không nối với đoạn trước/sau.
             unit.heading_like = True
+        if (
+            ocr and len(lines) == 1 and size >= 1.12 * self.body_size and len(visible.split()) <= 12
+            and not _ends_sentence(visible)
+        ):
+            unit.heading_like = True  # OCR không có chữ đậm: dòng to hơn thân bài, đứng riêng
         return unit
 
     def _block_units(self, page: PageLayout, segment: Tuple[int, int], block: TextBlock, m: _Metrics, style: _Style) -> List[_Unit]:
@@ -945,7 +1268,7 @@ class PdfLayoutAnalyzer:
         if not lines:
             return []
         align = self._alignment(lines, m)
-        body = self._is_body_size(block.size) or block.ocr
+        body = self._is_body_size(block.size, ocr=block.ocr)
         if not body:
             return [self._make_unit(page, segment, lines, m, style, align=align, ocr=block.ocr)]
         if align == "center" and len(lines) > 1:
@@ -1016,14 +1339,20 @@ class PdfLayoutAnalyzer:
         next_text = unit.para.visible().lstrip()
         if not prev_text or not next_text or not prev.last_full or prev.quote != unit.quote:
             return False
+        if next_text.startswith("•"):
+            return False  # mục danh sách mới
         if prev.segment == unit.segment:
             if unit.first_y0 - prev.last_y0 > self.pitch * 1.35:
                 return False
+            if continues_sentence(prev_text, next_text):
+                return True  # dòng thụt lề treo của mục danh sách, dòng cuối đoạn bị tách riêng
             if style.indent:
                 return not unit.indented
             return continues_sentence(prev_text, next_text) or not _ends_sentence(prev_text)
         if not (prev.last_in_segment and unit.first_in_segment):
             return False
+        if continues_sentence(prev_text, next_text):
+            return True
         if style.indent:
             return not unit.indented
         return not _ends_sentence(prev_text) or next_text[:1].islower()
@@ -1143,7 +1472,8 @@ class PdfLayoutAnalyzer:
                 used.add(found)
                 units[found].heading_level = min(4, level - min_level + 1)
                 matched += 1
-        return matched >= max(1, 0.5 * len(entries))
+        # Mục lục 1-2 mục (calibre hay ghi "Bìa", "Mục lục") không đủ làm khung chương.
+        return matched >= max(3, 0.5 * len(entries))
 
     # ---- Siêu dữ liệu -------------------------------------------------------------------------
 
@@ -1189,7 +1519,7 @@ class PdfLayoutAnalyzer:
             for index in range(page_count):
                 pages.append(self._extract_page(doc[index], index + 1))
                 if index % 5 == 0 or index == page_count - 1:
-                    self.progress(0.05 + 0.65 * (index + 1) / max(1, page_count), f"Đọc trang {index + 1}/{page_count}")
+                    self.progress(0.05 + 0.25 * (index + 1) / max(1, page_count), f"Đọc trang {index + 1}/{page_count}")
 
             cover_bytes = None
             skip_first_page = False
@@ -1205,8 +1535,13 @@ class PdfLayoutAnalyzer:
                     cover_bytes = render_page_image(doc[0], self.device.screen_width, self.device.screen_height)
                 except Exception:
                     cover_bytes = None
-                if cover_bytes and big and first.char_count < 80:
+                if cover_bytes and (big or first.needs_ocr) and first.char_count < 80:
                     skip_first_page = True  # trang 1 chính là ảnh bìa: không lặp lại trong nội dung
+            self._run_ocr(doc, pages, catalog_lang)
+            self._spell_check_ocr(pages)
+            if skip_first_page and pages[0].ocr_used and pages[0].char_count >= 300:
+                # Trang 1 là trang scan đầy chữ (không phải bìa): giữ nội dung, ảnh bìa vẫn lấy từ trang này.
+                skip_first_page = False
         finally:
             doc.close()
 
@@ -1254,10 +1589,15 @@ class PdfLayoutAnalyzer:
                 else:
                     page_units.extend(self._block_units(page, segment, item, cm, style))
             page_units = self._merge_centered(page_units)
+            # Trang "Mục lục" in sẵn: số trang căn phải làm dòng nào cũng "đầy" nên các mục bị nối thành đoạn.
+            refs = [u for u in page_units if u.kind == "text" and _PAGE_REF_END_RE.search(u.para.visible())]
+            if len(refs) >= 3:
+                for unit in refs:
+                    unit.toc_entry = True
             # Chú thích cuối trang: chữ nhỏ ở phần dưới trang, mở đầu bằng số/dấu sao.
             for unit in page_units:
                 if (
-                    unit.kind == "text" and not unit.body and unit.size <= 0.92 * self.body_size
+                    unit.kind == "text" and unit.size <= 0.92 * self.body_size
                     and unit.bbox[1] >= page.height * 0.6
                     and _FOOTNOTE_START_RE.match(unit.para.visible().strip() or "")
                 ):
@@ -1281,6 +1621,9 @@ class PdfLayoutAnalyzer:
             or self._title_from_filename(Path(self.source_name) if self.source_name else pdf_path)
         )
         author = self.author_override or (meta.get("author") or "").strip()
+        # Tên file chép từ macOS/điện thoại thường ở dạng tách dấu (NFD): dựng sẵn dấu để máy đọc hiện đúng.
+        title = unicodedata.normalize("NFC", title)
+        author = unicodedata.normalize("NFC", author)
         samples = [u.para.visible() for u in units[:4000] if u.kind == "text"]
         language = self.language_override or catalog_lang or detect_language(samples, default="en")
 
@@ -1312,14 +1655,24 @@ class PdfLayoutAnalyzer:
                 target.append({"block_id": block_id, "type": "image", "asset_id": asset_id, "bbox": unit.bbox, "confidence": 1.0})
                 continue
             text, bold, italic = unit.para.render()
-            if not strip_markers(text).strip():
+            visible = strip_markers(text).strip()
+            if not visible:
                 continue
+            font_size = unit.size
+            ratio = unit.size / max(self.body_size, 1.0)
+            if (
+                unit.ocr and unit.line_count == 1 and not unit.footnote and 1.12 <= ratio < 1.31
+                and len(visible.split()) <= 12 and not _ends_sentence(visible)
+            ):
+                # OCR không cho biết chữ đậm và ước lượng cỡ chữ tiêu đề nghiêng thấp hơn thật (1,23 lần thay vì
+                # 1,41): dòng đứng riêng, ngắn, to hơn thân bài thì báo đủ cỡ để StructureBuilder nhận là tiêu đề.
+                font_size = self.body_size * 1.31
             block = {
                 "block_id": block_id,
                 "type": "text",
                 "text": text,
                 "bbox": unit.bbox,
-                "font_size": round(unit.size, 1),
+                "font_size": round(font_size, 1),
                 "font_name": "",
                 "is_bold": bold >= 0.6,
                 "is_italic": italic >= 0.6,
@@ -1347,7 +1700,12 @@ class PdfLayoutAnalyzer:
                 + ": giữ nguyên dạng ảnh cả trang, không co giãn chữ được."
             )
         if ocr_pages:
-            warnings.append(f"{ocr_pages} trang scan đã được nhận dạng chữ (OCR); nên đọc soát lỗi chính tả.")
+            lang_label = {"vie": "tiếng Việt", "eng": "tiếng Anh"}.get(self.ocr_lang, self.ocr_lang)
+            fixed_note = f", tự sửa {self.spell_fixes} lỗi dấu theo ngữ cảnh" if self.spell_fixes else ""
+            warnings.append(
+                f"{ocr_pages} trang scan đã được nhận dạng chữ bằng Tesseract ({lang_label}{fixed_note}); "
+                "chữ in nghiêng và tiêu đề phông trang trí có thể còn sai, nên đọc soát."
+            )
         if not any(b["type"] != "image" for p in out_pages.values() for b in p["blocks"]):
             warnings.append("Không tìm thấy chữ trong PDF: sách chỉ gồm ảnh trang.")
 
