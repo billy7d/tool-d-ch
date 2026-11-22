@@ -43,6 +43,10 @@ class OcrLine:
     x_size: float  # chiều cao chữ ước lượng (pixel)
     confidence: float  # 0..1
     word_confidences: List[float] = field(default_factory=list)  # theo từng từ (cách nhau bởi khoảng trắng)
+    word_boxes: List[Tuple[int, int, int, int]] = field(default_factory=list)  # pixel, theo từng từ
+    # Theo từng từ, từng chữ cái: (điểm của chữ đã chọn, ((chữ thay thế, điểm), ...)) do LSTM của Tesseract
+    # cân nhắc (lstm_choice_mode=2). Rỗng khi không bật chế độ đó.
+    word_alternatives: List[tuple] = field(default_factory=list)
 
 
 @dataclass
@@ -101,6 +105,46 @@ def _parse_title(title: str) -> Tuple[Optional[Tuple[int, int, int, int]], Optio
     )
 
 
+_CHOICE_CONF_RE = re.compile(r"x_confs ([\d.]+)")
+
+
+def _word_chars(word) -> Tuple[str, tuple]:
+    """Chữ của một từ hOCR và phương án thay thế từng chữ cái (khi có lstm_choice_mode=2).
+
+    Ở chế độ đó mỗi chữ cái là một span "x_bboxes" theo sau là nhóm span "lstm_choices"; text_content() của cả
+    từ khi đó lẫn cả chữ thay thế nên phải ghép lại từ các span chữ cái.
+    """
+    chars: List[str] = []
+    alternatives: List[list] = []
+    for child in word:
+        title = child.get("title") or ""
+        ident = child.get("id") or ""
+        if title.startswith("x_bboxes"):
+            chars.append(child.text or "")
+            alternatives.append([])
+        elif ident.startswith("lstm_choices") and alternatives:
+            for choice in child:
+                match = _CHOICE_CONF_RE.search(choice.get("title") or "")
+                if match and choice.text:
+                    alternatives[-1].append((choice.text, float(match.group(1))))
+    if not chars:
+        return (word.text_content() or "").strip(), ()
+    text = "".join(chars)
+    packed = []
+    for char, choices in zip(chars, alternatives):
+        own = max((conf for alt, conf in choices if alt == char), default=None)
+        top = max((conf for _, conf in choices), default=0.0)
+        others = {}
+        for alt, conf in choices:
+            if alt != char and conf >= 5.0 and conf > others.get(alt, 0.0):
+                others[alt] = conf
+        packed.append((round(own if own is not None else top, 1),
+                       tuple(sorted(((a, round(c, 1)) for a, c in others.items()), key=lambda x: -x[1]))))
+    if text.strip() != text:
+        return text.strip(), ()
+    return text, tuple(packed)
+
+
 def parse_hocr(data: bytes, dpi: int = 300) -> OcrPage:
     from lxml import html as lxml_html
 
@@ -116,16 +160,18 @@ def parse_hocr(data: bytes, dpi: int = 300) -> OcrPage:
             if line.get("class") not in _LINE_CLASSES:
                 continue
             bbox, x_size, _ = _parse_title(line.get("title", ""))
-            words, confs = [], []
+            words, confs, boxes, alternatives = [], [], [], []
             for word in line.iter():
                 if word.get("class") != "ocrx_word":
                     continue
-                text = (word.text_content() or "").strip()
-                if not text:
+                text, alts = _word_chars(word)
+                if not text or any(ch.isspace() for ch in text):
                     continue
                 words.append(text)
-                _, _, conf = _parse_title(word.get("title", ""))
+                word_box, _, conf = _parse_title(word.get("title", ""))
                 confs.append(conf if conf is not None else 50)
+                boxes.append(word_box or bbox or (0, 0, 0, 0))
+                alternatives.append(alts)
             if not words or not bbox:
                 continue
             height = bbox[3] - bbox[1]
@@ -135,6 +181,8 @@ def parse_hocr(data: bytes, dpi: int = 300) -> OcrPage:
                 x_size=x_size or float(height),
                 confidence=sum(confs) / len(confs) / 100.0,
                 word_confidences=[c / 100.0 for c in confs],
+                word_boxes=boxes,
+                word_alternatives=alternatives if any(alternatives) else [],
             ))
         if paragraph.lines:
             paragraphs.append(paragraph)
@@ -206,13 +254,21 @@ class OCREngine:
     # ---- Nhận dạng --------------------------------------------------------------------------
 
     def recognize(self, image_bytes: bytes, lang: Optional[str] = None, dpi: int = 300,
-                  single_thread: bool = False, timeout: int = 300) -> OcrPage:
-        """OCR một ảnh trang (nên là PNG, xem encode_png). Trả về các đoạn/dòng kèm toạ độ pixel."""
+                  single_thread: bool = False, timeout: int = 300, psm: int = 3,
+                  alternatives: bool = False) -> OcrPage:
+        """OCR một ảnh (nên là PNG, xem encode_png). Trả về các đoạn/dòng kèm toạ độ pixel.
+
+        psm: 3 cho cả trang, 6 cho một khối dòng đã cắt sẵn, 7 cho một dòng.
+        alternatives: lấy thêm phương án thay thế của từng chữ cái (chậm hơn ~10%, hOCR lớn hơn nhiều): bộ sửa lỗi
+        dấu dùng để biết Tesseract đã phân vân giữa "ể" và "ề" hay chắc chắn.
+        """
         if not self.is_available:
             return OcrPage([], dpi)
         args, cwd = self._tessdata_args()
         cmd = [str(self.executable), "stdin", "stdout", *args, "-l", self.resolve_lang(lang),
-               "--psm", "3", "--dpi", str(dpi), "-c", "tessedit_create_hocr=1"]
+               "--psm", str(psm), "--dpi", str(dpi), "-c", "tessedit_create_hocr=1"]
+        if alternatives:
+            cmd += ["-c", "lstm_choice_mode=2", "-c", "hocr_char_boxes=1"]
         completed = subprocess.run(
             cmd, input=image_bytes, capture_output=True, timeout=timeout, cwd=cwd,
             env=self._env(single_thread), creationflags=_CREATE_NO_WINDOW,
@@ -223,9 +279,10 @@ class OCREngine:
         return parse_hocr(completed.stdout, dpi)
 
     def recognize_image(self, image: Image.Image, lang: Optional[str] = None, dpi: int = 300,
-                        single_thread: bool = False) -> OcrPage:
+                        single_thread: bool = False, psm: int = 3, alternatives: bool = False) -> OcrPage:
         """Mã hóa PNG rồi OCR; gọi được từ luồng phụ (Pillow nhả GIL khi nén)."""
-        return self.recognize(encode_png(image), lang=lang, dpi=dpi, single_thread=single_thread)
+        return self.recognize(encode_png(image), lang=lang, dpi=dpi, single_thread=single_thread, psm=psm,
+                              alternatives=alternatives)
 
     def ocr_image(self, image: Image.Image, dpi: int = 300) -> List[Dict[str, Any]]:
         """API cũ cho PDFExtractor: mỗi dòng một khối {text, confidence, bbox (pixel)}."""

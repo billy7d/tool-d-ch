@@ -16,6 +16,7 @@ Kết quả là danh sách trang/khối cùng định dạng StructureBuilder đ
 """
 from __future__ import annotations
 
+import copy
 import difflib
 import hashlib
 import io
@@ -86,6 +87,7 @@ class Span:
     italic: bool = False
     sup: bool = False
     word_confidences: Optional[List[float]] = None  # chữ OCR: độ tin cậy từng từ (0..1)
+    word_alternatives: Optional[list] = None  # chữ OCR: phương án thay thế từng chữ cái (xem OcrLine)
 
 
 @dataclass
@@ -457,6 +459,9 @@ class PdfLayoutAnalyzer:
         self.ocr = OCREngine(lang="eng")
         self.ocr_lang = ""
         self.spell_fixes = 0
+        self.ocr_repairs = 0
+        self.name_fixes = 0
+        self.heading_fixes = 0
         self.body_size = 11.0
         self.pitch = 13.0
         self.vocab: set = set()
@@ -672,13 +677,104 @@ class PdfLayoutAnalyzer:
             figures.append(ImageItem(path, bbox, crop.width, crop.height, hashlib.md5(data).hexdigest()))
         return figures
 
+    def _ocr_diagrams(self, layout: PageLayout, result: OcrPage, image: Image.Image, dpi: int
+                      ) -> Tuple[List[ImageItem], set]:
+        """Sơ đồ có chữ trên trang scan (vòng lặp, mũi tên): giữ thành hình, bỏ chữ OCR rời rạc bên trong.
+
+        Xoá chữ đã nhận ra khỏi ảnh trang; mực còn lại là nét vẽ. Dải nét vẽ đủ lớn (cao >= ~1,2% trang, rộng
+        >= 20% trang) có chữ OCR nằm cùng chỗ là sơ đồ. Gạch chân, vạch kẻ mảnh, chữ hoa đầu chương (hẹp) không đủ.
+        Dòng chữ to (tiêu đề sơ đồ) để nguyên là chữ. Trả về (hình, id các dòng OCR đã đưa vào hình).
+        """
+        from PIL import ImageDraw
+
+        lines = [l for l in result.lines if l.text.strip()]
+        if not lines:
+            return [], set()
+        factor = 4
+        small = image.reduce(factor)
+        width, height = small.size
+        mask = small.point(lambda v: 255 if v < 128 else 0)
+        draw = ImageDraw.Draw(mask)
+        for line in lines:
+            for box in line.word_boxes or [line.bbox]:
+                draw.rectangle((box[0] // factor - 1, box[1] // factor - 1, box[2] // factor + 1, box[3] // factor + 1),
+                               fill=0)
+        top, bottom = int(height * 0.08), int(height * 0.92)
+        draw.rectangle((0, 0, width, top), fill=0)
+        draw.rectangle((0, bottom, width, height), fill=0)
+        rows = [mask.crop((0, y, width, y + 1)).histogram()[255] for y in range(height)]
+        bands: List[List[int]] = []
+        for y, count in enumerate(rows):
+            if count >= 2:
+                if bands and y - bands[-1][1] <= 3:
+                    bands[-1][1] = y
+                else:
+                    bands.append([y, y])
+        kept = []
+        for y0, y1 in bands:
+            box = mask.crop((0, y0, width, y1 + 1)).getbbox()
+            if not box:
+                continue
+            band_h, band_w = y1 - y0 + 1, box[2] - box[0]
+            ink = sum(rows[y0:y1 + 1])
+            wide_enough = band_w >= 0.2 * width or (band_h >= 0.03 * height and band_w >= 0.1 * width)
+            if band_h >= 0.012 * height and wide_enough and ink <= 0.35 * band_h * band_w:
+                kept.append([y0, y1, box[0], box[2]])
+        if not kept:
+            return [], set()
+        merged = [kept[0]]
+        for band in kept[1:]:
+            if band[0] - merged[-1][1] <= 0.03 * height:
+                last = merged[-1]
+                merged[-1] = [last[0], band[1], min(last[2], band[2]), max(last[3], band[3])]
+            else:
+                merged.append(band)
+        sizes = sorted(l.x_size for l in lines)
+        median = sizes[len(sizes) // 2]
+        figures: List[ImageItem] = []
+        taken: set = set()
+        for index, (y0, y1, x0, x1) in enumerate(merged):
+            py0, py1, px0, px1 = y0 * factor, (y1 + 1) * factor, x0 * factor, x1 * factor
+            inside = []
+            for line in lines:
+                center = (line.bbox[1] + line.bbox[3]) / 2
+                slack = 0.6 * (line.bbox[3] - line.bbox[1])
+                if py0 - slack <= center <= py1 + slack and line.x_size < 1.3 * median:
+                    inside.append(line)
+            if not inside:
+                continue  # hình không có chữ: _ocr_figures lo
+            text_width = max(l.bbox[2] for l in lines) - min(l.bbox[0] for l in lines)
+            if sum(1 for l in inside if l.bbox[2] - l.bbox[0] >= 0.85 * text_width) > 2:
+                continue  # dải mực cạnh đoạn văn dài (vạch kẻ lề...), không phải sơ đồ
+            fy0 = min([py0] + [l.bbox[1] for l in inside]) - 12
+            fy1 = max([py1] + [l.bbox[3] for l in inside]) + 12
+            fx0 = min([px0] + [l.bbox[0] for l in inside]) - 12
+            fx1 = max([px1] + [l.bbox[2] for l in inside]) + 12
+            box = (max(0, fx0), max(0, fy0), min(image.width, fx1), min(image.height, fy1))
+            crop = image.crop(box)
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG", optimize=True)
+            data = buf.getvalue()
+            path = self.image_dir / f"ocrdiagram_{layout.number:05d}_{index}.png"
+            path.write_bytes(data)
+            scale = 72.0 / dpi
+            figures.append(ImageItem(path, tuple(v * scale for v in box), crop.width, crop.height,
+                                     hashlib.md5(data).hexdigest()))
+            taken.update(id(l) for l in inside)
+        return figures, taken
+
     def _apply_ocr(self, doc, layout: PageLayout, result: Optional[OcrPage], image: Image.Image, dpi: int) -> None:
         if result is not None:
             scale = 72.0 / dpi
             blocks: List[TextBlock] = []
+            diagrams, in_diagram = (
+                self._ocr_diagrams(layout, result, image, dpi) if self.include_images else ([], set())
+            )
             for paragraph in result.paragraphs:
                 lines = []
                 for ocr_line in paragraph.lines:
+                    if id(ocr_line) in in_diagram:
+                        continue  # chữ nằm trong sơ đồ: đã giữ trong hình
                     text = _fix_ocr_bullet(clean_span_text(ocr_line.text).strip())
                     if not text or ocr_line.confidence < 0.4:
                         continue  # chữ "nhận" nhầm trong ảnh, vết bẩn
@@ -686,8 +782,11 @@ class PdfLayoutAnalyzer:
                     if alnum < 3 and not text.strip(" .").isdigit() or alnum < 0.4 * len(text.replace(" ", "")):
                         continue  # vạch trang trí đọc thành ký hiệu ("\" ˆ LẠ")
                     x0, y0, x1, y1 = (v * scale for v in ocr_line.bbox)
+                    same_words = text.split() == ocr_line.text.split()
                     confidences = ocr_line.word_confidences if len(ocr_line.word_confidences) == len(text.split()) else None
-                    lines.append(Line([Span(text, size=max(5.0, ocr_line.x_size * scale), word_confidences=confidences)],
+                    alternatives = ocr_line.word_alternatives if same_words and ocr_line.word_alternatives else None
+                    lines.append(Line([Span(text, size=max(5.0, ocr_line.x_size * scale), word_confidences=confidences,
+                                            word_alternatives=alternatives)],
                                       x0, y0, x1, y1))
                 if lines:
                     blocks.append(TextBlock(lines, ocr=True))
@@ -697,7 +796,7 @@ class PdfLayoutAnalyzer:
             if (chars >= 20 and confidence >= 0.5) or (chars >= 2 and confidence >= 0.8):
                 items: list = list(blocks)
                 if self.include_images:
-                    for figure in self._ocr_figures(layout, blocks, image, dpi):
+                    for figure in self._ocr_figures(layout, blocks, image, dpi) + diagrams:
                         position = next((i for i, it in enumerate(items) if it.bbox[1] > figure.bbox[1]), len(items))
                         items.insert(position, figure)
                 layout.items = items
@@ -742,32 +841,130 @@ class PdfLayoutAnalyzer:
         if not model.unigrams:
             return  # không có từ điển Anh-Việt (data/dictionaries/en-vi): không đủ căn cứ để sửa dấu
         all_blocks = [it for p in pages for it in p.items if isinstance(it, TextBlock)]
+        # Tên riêng/chữ nước ngoài đọc sai lẻ tẻ thống nhất theo cách đọc phổ biến trong sách ("Scahawks" -> "Seahawks").
+        from app.services.ebook.ocr_repair import apply_name_mapping, fix_number_token, unify_rare_names
+
+        names = unify_rare_names([l.text for b in ocr_blocks for l in b.lines], model)
+        self.name_fixes = len(names)
+        for block in ocr_blocks:
+            for line in block.lines:
+                for span in line.spans:
+                    text = apply_name_mapping(span.text, names)
+                    span.text = re.sub(r"\S+", lambda m: fix_number_token(m.group()), text)
         corrector = OcrSpellCorrector(
             model, (_LINE_BREAK.join(l.text for l in b.lines) for b in all_blocks),
             confident_words=self._confident_ocr_words(ocr_blocks),
         )
         sizes = sorted(l.size for b in ocr_blocks for l in b.lines)
         median = sizes[len(sizes) // 2] if sizes else 0.0
+        def text_span(line: Line) -> Optional[Span]:
+            if len(line.spans) == 1:
+                return line.spans[0]
+            if len(line.spans) == 2 and len(line.spans[0].text.strip()) == 1:
+                return line.spans[1]  # dòng đầu chương có chữ hoa lớn (drop cap) đã ghép vào
+            return None
+
+        corrected: List[Tuple[Span, str]] = []
         for block in ocr_blocks:
-            lines = [l for l in block.lines if len(l.spans) == 1]
+            lines = [l for l in block.lines if text_span(l) is not None]
             if not lines:
                 continue
+            spans = [text_span(l) for l in lines]
             heading = all(l.size >= 1.12 * median for l in lines)
-            texts = [lowercase_stray_capitals(l.spans[0].text, model) for l in lines]
-            confidences: Optional[List[float]] = []
-            for line, text in zip(lines, texts):
-                word_confs = line.spans[0].word_confidences
-                if confidences is not None and word_confs and len(word_confs) == len(text.split()):
-                    confidences.extend(word_confs)
-                else:
-                    confidences = None
-            fixed = corrector.correct_tokens(_LINE_BREAK.join(texts), heading=heading,
-                                             confidences=confidences).split(_LINE_BREAK)
+            texts = [lowercase_stray_capitals(span.text, model) for span in spans]
+            # Dòng thiếu độ tin cậy/phương án thay thế (dòng bị sửa dấu đầu dòng) vẫn sửa được: chỗ trống là None/().
+            confidences: List[Optional[float]] = []
+            alternatives: list = []
+            for span, text in zip(spans, texts):
+                count = len(text.split())
+                word_confs = span.word_confidences
+                confidences.extend(word_confs if word_confs and len(word_confs) == count else [None] * count)
+                word_alts = span.word_alternatives
+                alternatives.extend(word_alts if word_alts and len(word_alts) == count else [()] * count)
+            fixed = corrector.correct_tokens(_LINE_BREAK.join(texts), heading=heading, confidences=confidences,
+                                             alternatives=alternatives).split(_LINE_BREAK)
             if len(fixed) != len(lines):
                 continue
-            for line, text in zip(lines, fixed):
-                line.spans[0].text = text
+            for span, text, before in zip(spans, fixed, texts):
+                span.text = text
+                corrected.append((span, before))
         self.spell_fixes = sum(corrector.changes.values())
+        self.spell_fixes += self._consistent_collocations(corrected)
+
+    @staticmethod
+    def _consistent_collocations(corrected: Sequence[Tuple[Span, str]]) -> int:
+        """Một cặp chữ OCR ("cái bãy") được sửa thống nhất ở hầu hết các chỗ ("cái bẫy" 6/7 lần) thì chỗ còn lại
+        theo đa số: ngữ cảnh ở chỗ đó có thể kéo sai ("cái bay nằm")."""
+        def tokens(text: str) -> List[str]:
+            return text.split()
+
+        votes: Dict[Tuple[str, str], Counter] = defaultdict(Counter)
+        rows = []
+        for span, before in corrected:
+            old, new = tokens(before), tokens(span.text)
+            if len(old) != len(new):
+                continue
+            rows.append((span, old, new))
+            for index in range(1, len(old)):
+                key = (new[index - 1].lower(), old[index].lower())
+                if old[index].isalpha() and new[index - 1].isalpha():
+                    votes[key][new[index].lower()] += 1
+        fixes = 0
+        for span, old, new in rows:
+            changed = False
+            for index in range(1, len(old)):
+                key = (new[index - 1].lower(), old[index].lower())
+                counter = votes.get(key)
+                if not counter or old[index].lower() == new[index].lower() and len(counter) == 1:
+                    continue
+                winner, count = counter.most_common(1)[0]
+                total = sum(counter.values())
+                if (
+                    winner != new[index].lower() and winner != old[index].lower()
+                    and count >= 3 and count >= 0.75 * total
+                ):
+                    word = new[index]
+                    new[index] = winner[:1].upper() + winner[1:] if word[:1].isupper() else winner
+                    changed = True
+                    fixes += 1
+            if changed:
+                # Giữ nguyên khoảng trắng/xuống dòng: thay từng chữ theo thứ tự.
+                pieces = re.split(r"(\s+)", span.text)
+                position = 0
+                for k, piece in enumerate(pieces):
+                    if piece and not piece.isspace():
+                        pieces[k] = new[position]
+                        position += 1
+                span.text = "".join(pieces)
+        return fixes
+
+    def _ocr_page(self, image: Image.Image, dpi: int, single_thread: bool) -> OcrPage:
+        """OCR một trang (chạy ở luồng phụ). Sách tiếng Việt: lấy thêm phương án thay thế từng chữ cái cho bộ sửa
+        dấu, rồi đọc lại các dòng vỡ chữ (chữ in nghiêng, tên tiếng Anh) bằng "eng" và "vie" trên ảnh nắn thẳng."""
+        vietnamese = self.ocr_lang.startswith("vie")
+        result = self.ocr.recognize_image(image, self.ocr_lang, dpi, single_thread, alternatives=vietnamese)
+        if vietnamese and "eng" in self.ocr.available_languages():
+            from app.services.ebook.ocr_repair import repair_page_lines
+
+            def recognize(im: Image.Image, lang: str, resolution: int) -> OcrPage:
+                return self.ocr.recognize_image(im, lang, resolution, single_thread, psm=6,
+                                                alternatives=lang == "vie")
+
+            try:
+                result.repaired = repair_page_lines(image, result.lines, recognize, dpi)
+            except Exception as exc:  # đọc lại chỉ là bước làm tốt thêm: lỗi thì giữ kết quả OCR gốc
+                print(f"[OCR] đọc lại dòng vỡ chữ lỗi: {exc}")
+        if vietnamese:
+            from app.services.ebook.ocr_repair import restore_drop_caps
+
+            def recognize_char(im: Image.Image, lang: str, resolution: int) -> OcrPage:
+                return self.ocr.recognize_image(im, lang, resolution, single_thread, psm=10)
+
+            try:
+                restore_drop_caps(image, result.lines, recognize_char, dpi)
+            except Exception as exc:
+                print(f"[OCR] khôi phục chữ hoa đầu chương lỗi: {exc}")
+        return result
 
     def _run_ocr(self, doc, pages: Sequence[PageLayout], catalog_lang: str) -> None:
         """OCR các trang scan song song: luồng chính render (PyMuPDF không an toàn đa luồng), mỗi luồng phụ
@@ -796,6 +993,7 @@ class PdfLayoutAnalyzer:
                 except Exception as exc:
                     print(f"[OCR] trang {layout.number}: {exc}")
                     result = None
+                self.ocr_repairs += getattr(result, "repaired", 0) if result is not None else 0
                 self._apply_ocr(doc, layout, result, image, dpi)
                 completed += 1
                 self.progress(0.3 + 0.4 * completed / total, f"Nhận dạng chữ (OCR) trang {completed}/{total}")
@@ -810,7 +1008,7 @@ class PdfLayoutAnalyzer:
                     self._keep_scan_image(page, layout)
                     completed += 1
                     continue
-                future = pool.submit(self.ocr.recognize_image, image, self.ocr_lang, dpi, single_thread)
+                future = pool.submit(self._ocr_page, image, dpi, single_thread)
                 inflight[future] = (layout, image, dpi)
                 while len(inflight) >= workers * 2:
                     collect()
@@ -1202,8 +1400,30 @@ class PdfLayoutAnalyzer:
                 groups[-1].append(line)
         return groups
 
-    def _is_verse(self, lines: Sequence[Line], m: _Metrics) -> bool:
+    @staticmethod
+    def _continuation_ratio(lines: Sequence[Line]) -> float:
+        """Tỷ lệ dòng (trừ dòng đầu) mở đầu bằng chữ thường: câu chạy tiếp từ dòng trên, kiểu văn xuôi."""
+        if len(lines) < 2:
+            return 0.0
+        lower = 0
+        for line in lines[1:]:
+            first = next((ch for ch in line.text if ch.isalpha()), "")
+            lower += first.islower()
+        return lower / (len(lines) - 1)
+
+    def _ragged_prose(self, lines: Sequence[Line]) -> bool:
+        """Văn xuôi canh trái, lề phải không đều (bìa sau, lời giới thiệu): dòng nào cũng gần kín bề rộng khối và
+        câu chạy tiếp sang dòng sau. Không phải thơ, không giữ xuống dòng."""
         if len(lines) < 3:
+            return False
+        left, right = min(l.x0 for l in lines), max(l.x1 for l in lines)
+        width = max(1.0, right - left)
+        body = lines[:-1]
+        wide = sum(1 for l in body if l.x1 >= right - 0.2 * width)
+        return wide >= 0.7 * len(body) and self._continuation_ratio(lines) >= 0.5
+
+    def _is_verse(self, lines: Sequence[Line], m: _Metrics) -> bool:
+        if len(lines) < 3 or self._ragged_prose(lines):
             return False
         em = self.body_size
         short = [l for l in lines if l.x1 < m.right - 4 * em]
@@ -1272,7 +1492,9 @@ class PdfLayoutAnalyzer:
         if not body:
             return [self._make_unit(page, segment, lines, m, style, align=align, ocr=block.ocr)]
         if align == "center" and len(lines) > 1:
-            return [self._make_unit(page, segment, lines, m, style, align="center", verse=True, ocr=block.ocr)]
+            # Đoạn văn căn giữa (câu chạy qua nhiều dòng) thì không giữ xuống dòng như thơ.
+            prose = len(lines) >= 3 and self._continuation_ratio(lines) >= 0.6
+            return [self._make_unit(page, segment, lines, m, style, align="center", verse=not prose, ocr=block.ocr)]
         if align and len(lines) == 1:
             return [self._make_unit(page, segment, lines, m, style, align=align, ocr=block.ocr)]
         units = []
@@ -1334,15 +1556,49 @@ class PdfLayoutAnalyzer:
 
     # ---- Nối đoạn sang trang/cột --------------------------------------------------------------
 
+    def _mark_footnote_continuations(self, page: PageLayout, page_units: List[_Unit]) -> None:
+        """Chú thích không mở đầu bằng số/dấu sao nhưng vẫn là chú thích (trang scan):
+
+        - dòng tiếp theo của một chú thích bị tách thành khối riêng ("* Pinball là ..." + "mặt bàn nghiêng (ND).");
+        - phần còn lại của chú thích trang trước, nằm cuối trang này, chữ nhỏ hẳn so với thân bài ngay trên nó
+          ("chúng từ cuốn sách ... Richard Lederer.").
+        Không nhận ra thì khối chữ nhỏ đó chen vào giữa đoạn văn bị ngắt trang.
+        """
+        texts = [u for u in page_units if u.kind == "text"]
+        for index, unit in enumerate(texts):
+            if unit.footnote or not unit.ocr:
+                continue
+            previous = texts[index - 1] if index else None
+            small = unit.size <= 0.88 * self.body_size
+            below = unit.bbox[1] >= page.height * 0.55
+            if not (small and below):
+                continue
+            if previous is not None and previous.footnote and unit.bbox[1] >= previous.bbox[1]:
+                unit.footnote = True
+                continue
+            rest = texts[index + 1:]
+            if (
+                previous is not None and previous.size >= 0.92 * self.body_size and not previous.footnote
+                and all(u.size <= 0.92 * self.body_size or u.footnote for u in rest)
+                and unit.para.visible().strip()[:1].islower()
+            ):
+                unit.footnote = True
+
     def _continues(self, prev: _Unit, unit: _Unit, style: _Style) -> bool:
         prev_text = prev.para.visible().rstrip()
         next_text = unit.para.visible().lstrip()
-        if not prev_text or not next_text or not prev.last_full or prev.quote != unit.quote:
+        if not prev_text or not next_text or not prev.last_full:
             return False
+        if prev.quote != unit.quote and not (
+            prev.segment != unit.segment and prev.last_in_segment and unit.first_in_segment
+            and continues_sentence(prev_text, next_text)
+        ):
+            return False  # (mục danh sách thụt lề bị ngắt sang trang sau thì vẫn nối)
         if next_text.startswith("•"):
             return False  # mục danh sách mới
         if prev.segment == unit.segment:
-            if unit.first_y0 - prev.last_y0 > self.pitch * 1.35:
+            # Dòng có chỉ số chú thích cao hơn dòng thường: đo khoảng trống từ đáy dòng trước.
+            if unit.first_y0 - prev.last_y0 > self.pitch * 1.35 and unit.first_y0 - prev.last_y1 > self.pitch * 0.5:
                 return False
             if continues_sentence(prev_text, next_text):
                 return True  # dòng thụt lề treo của mục danh sách, dòng cuối đoạn bị tách riêng
@@ -1413,10 +1669,50 @@ class PdfLayoutAnalyzer:
         out: List[_Unit] = []
         last_body: Optional[int] = None
         last_flow: Optional[int] = None
+        last_note: Optional[int] = None
+        last_small: Optional[int] = None
+
+        def small_flow(u: _Unit) -> bool:
+            # Chữ nhỏ hơn thân bài nhưng vẫn là văn xuôi (bìa sau, lời khen): nối các dòng cùng cỡ trên một trang.
+            return (
+                u.kind == "text" and u.ocr and not u.body and not u.align and not u.verse and not u.scene
+                and not u.heading_level and not u.heading_like and not u.footnote and not u.toc_entry
+            )
+
         for unit in units:
+            # Chữ nhỏ: dòng sau có thể được ước lượng cỡ khác một chút (8,9 / 9,4pt) nên lúc là "thân bài", lúc không.
+            flow_prev = last_small if last_small is not None else (last_body if unit.ocr else None)
+            if (small_flow(unit) or (unit.joinable and unit.ocr)) and flow_prev is not None and (
+                small_flow(unit) or small_flow(out[flow_prev])
+            ):
+                prev = out[flow_prev]
+                if (
+                    prev.segment == unit.segment and abs(prev.size - unit.size) <= 0.12 * max(prev.size, unit.size)
+                    and prev.last_full and unit.first_y0 - prev.last_y1 <= self.pitch
+                    and continues_sentence(prev.para.visible().rstrip(), unit.para.visible().lstrip())
+                ):
+                    prev.para.extend(unit.para, self.vocab, self.hyphen_vocab)
+                    prev.last_full = unit.last_full
+                    prev.last_y0, prev.last_y1 = unit.last_y0, unit.last_y1
+                    prev.line_count += unit.line_count
+                    continue
             if unit.kind == "text" and unit.footnote:
+                text = unit.para.visible().strip()
+                if last_note is not None and text[:1].islower() and not _FOOTNOTE_START_RE.match(text):
+                    # Phần tiếp của chú thích (dòng bị tách, hoặc vắt sang trang sau): nối vào chú thích trước.
+                    out[last_note].para.extend(unit.para, self.vocab, self.hyphen_vocab)
+                    continue
                 out.append(unit)
+                last_note = len(out) - 1
                 continue
+            if (
+                unit.kind == "text" and unit.ocr and not unit.joinable and unit.line_count == 1 and last_body is not None
+                and not unit.align and not unit.heading_level and len(unit.para.visible().split()) <= 3
+                and continues_sentence(out[last_body].para.visible().rstrip(), unit.para.visible().lstrip())
+                and out[last_body].last_full
+            ):
+                # Mảnh cuối câu chỉ có chữ thấp ("sau:"): OCR đoán cỡ chữ quá nhỏ nên không coi là thân bài.
+                unit.body = True
             if last_flow is not None and self._continues_centered(out[last_flow], unit):
                 self._absorb_line_block(out[last_flow], unit)
                 continue
@@ -1432,6 +1728,219 @@ class PdfLayoutAnalyzer:
             out.append(unit)
             last_body = len(out) - 1 if unit.joinable else None
             last_flow = len(out) - 1
+            last_small = len(out) - 1 if small_flow(unit) or (unit.joinable and unit.ocr and unit.size < 0.85 * self.body_size) else None
+        return out
+
+    # ---- Mục lục in sẵn và tiêu đề (sách scan) -----------------------------------------------------
+
+    @staticmethod
+    def _set_text(unit: _Unit, text: str) -> None:
+        unit.para = _Para()
+        unit.para._push(text, frozenset())
+
+    @staticmethod
+    def _junk_text(text: str) -> bool:
+        """Mảnh OCR vô nghĩa (vạch trang trí, "\" ˆ LẠ", "IIIII"): không có chữ nào dài hơn 2 ký tự có nghĩa."""
+        from app.services.ebook.ocr_repair import core_of, is_garbled
+
+        tokens = text.split()
+        if not tokens:
+            return True
+        for token in tokens:
+            core = core_of(token)
+            if len(core) <= 2 or is_garbled(token) or (len(set(core.lower())) == 1 and len(core) >= 3):
+                continue
+            return False
+        return True
+
+    def _repair_toc_and_headings(self, units: List[_Unit]) -> List[_Unit]:
+        """Dọn trang "Mục lục" in sẵn và sửa tiêu đề chương/mục theo nó (xem toc_repair)."""
+        from app.services.ebook.ocr_repair import core_of
+        from app.services.ebook.toc_repair import (
+            _CHAPTER_RE, best_entry, chapter_number, has_page_ref, merge_readings, parse_entry, similarity,
+            split_merged,
+        )
+        from app.services.ebook.vi_spell import VietSyllableModel
+
+        body = self.body_size
+        # Mảnh OCR vô nghĩa đứng riêng: bỏ.
+        units = [u for u in units if not (
+            u.kind == "text" and u.ocr and not u.footnote and u.line_count <= 2
+            and len(u.para.visible().strip()) <= 16 and self._junk_text(u.para.visible())
+        )]
+        toc_pages = {u.page for u in units if u.toc_entry}
+        if not toc_pages:
+            return units
+        model = VietSyllableModel.shared()
+
+        # 1. Trang mục lục: nối mục bị xuống dòng, tách mục dính nhau, bỏ số trang; mục lục không phải tiêu đề.
+        out: List[_Unit] = []
+        toc_units: List[Tuple[_Unit, object]] = []
+        open_entry: Optional[_Unit] = None  # mục chưa có số trang: dòng sau có thể là phần còn lại của nó
+        last_toc = -1
+        for unit in units:
+            if unit.kind != "text" or unit.page not in toc_pages or unit.footnote:
+                out.append(unit)
+                continue
+            text = " ".join(unit.para.visible().split())
+            if not unit.toc_entry and len(text) <= 20 and similarity(text.strip("| "), "MỤC LỤC") >= 0.6:
+                self._set_text(unit, "MỤC LỤC")
+                out.append(unit)
+                continue
+            previous = out[-1] if out else None
+            if (
+                open_entry is not None and previous is open_entry and previous.page == unit.page
+                and (text[:1].islower() or text[:1] == "(") and chapter_number(text) is None
+            ):
+                # "“Một trăm cái bánh ... sữa lắc" + "sô cô la lớn”: ..." là một mục bị xuống dòng.
+                text = previous.para.visible().strip() + " " + text
+                out.pop()
+                toc_units.pop()
+            open_entry = None
+            pieces = split_merged(text)
+            for index, piece in enumerate(pieces):
+                target = unit if index == 0 else copy.copy(unit)
+                entry = parse_entry(piece)
+                self._set_text(target, entry.full)
+                target.toc_entry = True
+                target.heading_like = False
+                target.size = min(target.size, body)  # dòng mục lục không được nhận nhầm thành tiêu đề chương
+                target.align = ""
+                out.append(target)
+                toc_units.append((target, entry))
+                last_toc = len(out) - 1
+            if not has_page_ref(pieces[-1]) and chapter_number(pieces[-1]) is None:
+                open_entry = out[-1]
+        if not toc_units:
+            return out
+
+        entries = [entry for _, entry in toc_units]
+        chapters = {e.chapter: e for e in entries if e.chapter is not None}
+        tops = [e for e in entries if e.chapter is None and (e.label or e.title.isupper())]
+        sections = [e for e in entries if e.chapter is None and not e.label and not e.title.isupper()]
+        toc_unit_of = {id(entry): unit for unit, entry in toc_units}
+
+        def heading_candidate(unit: _Unit) -> bool:
+            return (
+                unit.kind == "text" and not unit.footnote and not unit.toc_entry and unit.line_count <= 4
+                and (unit.heading_like or unit.size >= 1.25 * body)
+            )
+
+        # 2. Thân sách: tiêu đề chương, phần đầu/cuối sách, tiêu đề mục.
+        result = out[: last_toc + 1]
+        rest = out[last_toc + 1:]
+        index = 0
+        while index < len(rest):
+            unit = rest[index]
+            if not heading_candidate(unit):
+                result.append(unit)
+                index += 1
+                continue
+            text = " ".join(unit.para.visible().split())
+            number = chapter_number(text)
+            if number in chapters:
+                entry = chapters[number]
+                remainder = _CHAPTER_RE.sub("", text, count=1).strip(" |")
+                gathered = remainder
+                fragments: List[_Unit] = []
+                j = index + 1
+                while j < len(rest) and len(fragments) < 5:
+                    other = rest[j]
+                    if other.kind != "text" or other.page != unit.page or other.footnote:
+                        break
+                    other_text = " ".join(other.para.visible().split())
+                    if self._junk_text(other_text):
+                        fragments.append(other)
+                        j += 1
+                        continue
+                    if not heading_candidate(other) or best_entry(other_text, sections) is not None:
+                        break
+                    joined = (gathered + " " + other_text).strip()
+                    if entry.title and similarity(joined, entry.title) <= similarity(gathered, entry.title):
+                        break
+                    gathered = joined
+                    fragments.append(other)
+                    j += 1
+                if entry.title and similarity(gathered, entry.title) >= 0.45:
+                    title = merge_readings(entry.title, gathered, model)
+                    self._set_text(unit, f"CHƯƠNG {number}")
+                    result.append(unit)
+                    holder = next((f for f in fragments if not self._junk_text(f.para.visible())), None)
+                    if holder is None:
+                        holder = copy.copy(unit)
+                    self._set_text(holder, title)
+                    holder.toc_entry = False
+                    result.append(holder)
+                    index = j
+                    self.heading_fixes += 1
+                    continue
+                result.append(unit)
+                index += 1
+                continue
+            top = best_entry(text.strip("| "), tops, threshold=0.6)
+            if top is not None:
+                if top.label and top.title:
+                    # "DẪN NHẬP Vì sao đâu không phải..." -> "DẪN NHẬP" + tên phần.
+                    self._set_text(unit, top.label)
+                    result.append(unit)
+                    holder = copy.copy(unit)
+                    body_part = text.strip("| ")
+                    if body_part.upper().startswith(top.label.upper()):
+                        body_part = body_part[len(top.label):].strip(" |")
+                    self._set_text(holder, merge_readings(top.title, body_part, model))
+                    result.append(holder)
+                else:
+                    merged = merge_readings(top.full, text.strip("| "), model)
+                    self._set_text(unit, merged)
+                    result.append(unit)
+                    toc_unit = toc_unit_of.get(id(top))
+                    if toc_unit is not None:
+                        self._set_text(toc_unit, merged)  # sửa luôn dòng mục lục ("LỒI CẢM ƠN")
+                index += 1
+                self.heading_fixes += 1
+                continue
+            section = best_entry(text, sections)
+            if section is not None and len(section.title.split()) == len(text.split()):
+                merged = merge_readings(section.title, text, model)
+                if merged != text:
+                    self._set_text(unit, merged)
+                    self.heading_fixes += 1
+                toc_unit = toc_unit_of.get(id(section))
+                if toc_unit is not None and merged != section.title:
+                    self._set_text(toc_unit, merged)
+            result.append(unit)
+            index += 1
+        return self._split_toc_by_headings(result, last_toc, heading_candidate)
+
+    def _split_toc_by_headings(self, units: List[_Unit], last_toc: int, is_heading) -> List[_Unit]:
+        """Dòng mục lục gộp hai mục mà không có số trang ở giữa ("... thầy bói nói dựa Sự nguy hiểm của resulting"):
+        tách theo tiêu đề mục có thật trong thân sách."""
+        from app.services.ebook.toc_repair import similarity
+
+        headings = [" ".join(u.para.visible().split()) for u in units[last_toc + 1:] if is_heading(u)]
+        headings = [h for h in headings if len(h.split()) >= 2]
+        out: List[_Unit] = []
+        for position, unit in enumerate(units):
+            text = " ".join(unit.para.visible().split()) if unit.kind == "text" else ""
+            if position > last_toc or not unit.toc_entry or "|" in text:
+                out.append(unit)  # "CHƯƠNG 1 | ..." / "DẪN NHẬP | ..." là một mục có nhãn, không tách
+                continue
+            words = text.split()
+            split_at = None
+            for cut in range(2, len(words) - 1):
+                head, tail = " ".join(words[:cut]), " ".join(words[cut:])
+                if not tail[:1].isupper():
+                    continue
+                if any(similarity(head, h) >= 0.9 for h in headings) and any(similarity(tail, h) >= 0.85 for h in headings):
+                    split_at = cut
+                    break
+            if split_at is None:
+                out.append(unit)
+                continue
+            self._set_text(unit, " ".join(words[:split_at]))
+            second = copy.copy(unit)
+            self._set_text(second, " ".join(words[split_at:]))
+            out += [unit, second]
         return out
 
     # ---- Outline (mục lục PDF) ----------------------------------------------------------------
@@ -1538,7 +2047,6 @@ class PdfLayoutAnalyzer:
                 if cover_bytes and (big or first.needs_ocr) and first.char_count < 80:
                     skip_first_page = True  # trang 1 chính là ảnh bìa: không lặp lại trong nội dung
             self._run_ocr(doc, pages, catalog_lang)
-            self._spell_check_ocr(pages)
             if skip_first_page and pages[0].ocr_used and pages[0].char_count >= 300:
                 # Trang 1 là trang scan đầy chữ (không phải bìa): giữ nội dung, ảnh bìa vẫn lấy từ trang này.
                 skip_first_page = False
@@ -1554,6 +2062,9 @@ class PdfLayoutAnalyzer:
         for page in pages:
             self._fix_drop_caps(page)
         self._remove_running_heads(pages)
+        # Sửa dấu sau khi bỏ đầu trang: đầu trang lặp lại trên mọi trang ("MỘT VÁN POKER" đọc thành "VẤN POKER")
+        # sẽ làm sai thống kê của chính cuốn sách mà bộ sửa dựa vào.
+        self._spell_check_ocr(pages)
         metrics = self._page_metrics(pages)
         self.pitch = self._compute_pitch(pages)
         style = self._detect_style(pages, metrics)
@@ -1602,6 +2113,7 @@ class PdfLayoutAnalyzer:
                     and _FOOTNOTE_START_RE.match(unit.para.visible().strip() or "")
                 ):
                     unit.footnote = True
+            self._mark_footnote_continuations(page, page_units)
             by_segment: Dict[Tuple[int, int], List[_Unit]] = defaultdict(list)
             for unit in page_units:
                 if not unit.footnote:
@@ -1611,6 +2123,8 @@ class PdfLayoutAnalyzer:
                 seg_units[-1].last_in_segment = True
             units.extend(page_units)
 
+        if any(u.ocr for u in units if u.kind == "text"):
+            units = self._repair_toc_and_headings(units)
         outline_used = self._apply_outline(units, outline)
         units = self._join_units(units, style)
         self.progress(0.8, "Dựng đoạn văn")
@@ -1702,6 +2216,8 @@ class PdfLayoutAnalyzer:
         if ocr_pages:
             lang_label = {"vie": "tiếng Việt", "eng": "tiếng Anh"}.get(self.ocr_lang, self.ocr_lang)
             fixed_note = f", tự sửa {self.spell_fixes} lỗi dấu theo ngữ cảnh" if self.spell_fixes else ""
+            if self.ocr_repairs:
+                fixed_note += f", đọc lại {self.ocr_repairs} chữ in nghiêng/tiếng Anh"
             warnings.append(
                 f"{ocr_pages} trang scan đã được nhận dạng chữ bằng Tesseract ({lang_label}{fixed_note}); "
                 "chữ in nghiêng và tiêu đề phông trang trí có thể còn sai, nên đọc soát."

@@ -64,3 +64,39 @@ def test_lowercase_stray_capitals():
     assert lowercase_stray_capitals("họ thấy VUI vẻ lắm", model) == "họ thấy vui vẻ lắm"
     assert lowercase_stray_capitals("giải đấu NFL năm đó", model) == "giải đấu NFL năm đó"
     assert lowercase_stray_capitals("CHƯƠNG MỘT TƯ DUY", model) == "CHƯƠNG MỘT TƯ DUY"
+
+
+def _image_model() -> VietSyllableModel:
+    text = (
+        "kiếm tiền . tiền bạc . kiếm tiền nhiều . tôi chưa đi . tôi chưa từng . tiển . "
+        "để làm gì . đề nghị này . đề nghị của tôi . vấn đề lớn . chi tiết nhỏ . các chi tiết"
+    ) * 6
+    unigrams: Counter = Counter()
+    bigrams: Counter = Counter()
+    for sentence in text.split("."):
+        tokens = sentence.split()
+        unigrams.update(tokens)
+        bigrams.update(zip(tokens, tokens[1:]))
+    unigrams["tiển"] = 0
+    return VietSyllableModel(unigrams, bigrams)
+
+
+def test_corrector_uses_tesseract_alternatives():
+    corrector = OcrSpellCorrector(_image_model(), ["Tôi cần kiếm tiền."])
+    # "tiển": Tesseract đã cân nhắc "ề" (64 điểm) bên cạnh "ể" (94 điểm).
+    alternatives = [
+        ((95.0, ()), (95.0, ()), (95.0, ()), (95.0, ())),
+        ((95.0, ()), (94.0, ()), (94.0, (("ề", 64.0),)), (95.0, ()), (95.0, ())),
+    ]
+    fixed = corrector.correct_tokens("kiếm tiển.", confidences=[0.96, 0.96], alternatives=alternatives)
+    assert fixed == "kiếm tiền."
+
+
+def test_corrector_sentence_start_lowercase_l_is_capital_t():
+    corrector = OcrSpellCorrector(_image_model(), [])
+    assert corrector.correct_tokens("trước. lồi chưa đi.") == "trước. Tôi chưa đi."
+
+
+def test_corrector_skips_links():
+    corrector = OcrSpellCorrector(_image_model(), [])
+    assert corrector.correct_tokens("xem htp://www.afsa.org/ và tiền") == "xem htp://www.afsa.org/ và tiền"
