@@ -26,10 +26,20 @@ from app.services.translation.translation_signature import build_translation_sig
 from app.services.translation.node_policy import translatable_values
 from app.services.translation.quality_gate import TranslationQualityGate
 from app.services.translation.semantic_assurance import SemanticAssuranceService
+from app.services.translation.citation_policy import citation_passthrough, is_bibliographic_citation
 
 def has_no_words(text: str) -> bool:
     """Đoạn chỉ có số, ký hiệu, dấu câu ("***", "3.14", "[12]"): không có gì để dịch, giữ nguyên bản gốc."""
     return bool((text or "").strip()) and not any(char.isalpha() for char in text)
+
+
+def passthrough_text(node_type: str, text: str):
+    """Bản giữ nguyên không cần model: đoạn không có chữ, hoặc mục chú thích chỉ là trích dẫn tài liệu."""
+    if has_no_words(text):
+        return text
+    if (node_type or "").lower() == "footnote" and is_bibliographic_citation(text):
+        return citation_passthrough(text)
+    return None
 
 
 class TranslationWorker:
@@ -260,7 +270,7 @@ class TranslationWorker:
                 NodeModel.status.in_(["PENDING", "FAILED"]),
                 NodeModel.id != db_node.id,
             ).order_by(NodeModel.order_index).first()
-            if following is None or has_no_words(following.content):
+            if following is None or passthrough_text(following.node_type, following.content) is not None:
                 return
             next_node = engine.canonical_node(following)
             request = None
@@ -348,9 +358,10 @@ class TranslationWorker:
                     if not first_model:
                         break
 
-                    if has_no_words(first_model.content):
+                    kept = passthrough_text(first_model.node_type, first_model.content)
+                    if kept is not None:
                         semantic = SemanticAssuranceService.assure_and_commit(
-                            engine, chapter, first_model, first_model.content, signature,
+                            engine, chapter, first_model, kept, signature,
                             "passthrough", "translation_worker_passthrough", trusted_memory=True,
                         )
                         self._broadcast_assurance_telemetry(project_id, first_model.id, semantic)

@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set
 
+from app.services.translation.citation_policy import citation_passthrough, is_bibliographic_citation
 from app.services.translation.glossary_validator import GlossaryValidator
 from app.services.translation.language_validator import validate_target_language
 from app.services.translation.numeric_validator import NumericValidator
@@ -20,6 +21,13 @@ WORD_PATTERN = re.compile(r"\w+", re.UNICODE)
 CONTEXT_LEAK_MIN_WORDS = 6
 CONTEXT_LEAK_MIN_WORDS_SAME_LENGTH = 12
 CONTEXT_LEAK_OVERLAP = 0.8
+# Câu chỉ dẫn trong prompt bị model chép vào bản dịch (chạy sách thật: một chú thích ra
+# "20.\n\nNhắc lại: chỉ dùng chữ Quốc ngữ, ... Theo tôi được biết, từ prefeel ...").
+PROMPT_ECHO = re.compile(
+    r"Nhắc lại:\s*chỉ dùng chữ Quốc ngữ|chỉ trả về bản dịch|Thuật ngữ bắt buộc\s*:|Dịch đoạn tiếng Anh sau|"
+    r"không dùng chữ Hán|dịch hết mọi từ tiếng Anh",
+    re.IGNORECASE,
+)
 
 
 # Token phải giữ nguyên từng ký tự: đường dẫn ổ đĩa/Unix, lời gọi hàm có dấu chấm, code inline.
@@ -128,6 +136,8 @@ VIETNAMESE_LOANWORDS = {
     "electron", "proton", "neutron", "entropy", "alpha", "beta", "gamma", "delta", "omega",
     "kg", "km", "cm", "mm", "ml", "mg", "kw", "kwh", "mb", "gb", "tb", "kb", "hz", "mhz", "ghz", "ppm",
     "gram", "inch", "feet", "ounce", "pound", "yard", "mile",
+    # Từ mượn thường giữ nguyên trong sách tiếng Việt (dịch thử Stumbling on Happiness).
+    "cholesterol", "macaron", "bingo", "noir",
     # Viết tắt trong trích dẫn, chú thích.
     "tr", "ed", "eds", "trans", "vol", "pp", "ibid", "etc", "vs",
     # Tiền tố đo lường viết liền như tiếng Việt vẫn viết ("mili giây", "công nghệ nano") và đơn vị thời gian.
@@ -324,6 +334,13 @@ def _non_vietnamese_words(source_text: str, text: str, locked_glossary=None) -> 
         allowed.update(word.lower() for word in re.findall(r"[A-Za-z]+", span))
     for phrase in _DEFINED_PHRASE.findall(source_text or ""):
         allowed.update(word.lower() for word in re.findall(r"[A-Za-z]+", phrase))
+    # Tên khoa học hai phần chép đúng từ nguồn ("Aplysia parvula", "Macaca mulatta"): phần sau viết thường nhưng không
+    # phải chữ tiếng Anh cần dịch.
+    for genus, species in re.findall(r"\b([A-Z][a-z]{2,})\s+([a-z]{3,})\b", source_text or ""):
+        if f"{genus} {species}" in (text or "") and not (
+            _english_common_word(genus.lower()) or _english_common_word(species)
+        ):
+            allowed.add(species)
     found = list(dict.fromkeys(_fused_words(source_text, prose) + _malformed_words(source_text, prose)))
     title_like = _title_like(source_text or "")
     for match in _ASCII_WORD.finditer(prose):
@@ -391,6 +408,11 @@ class TranslationQualityGate:
         và làm rơi dấu ngoặc kép mở đầu lời thoại.
         """
         issues: List[Dict[str, str]] = []
+        echo = PROMPT_ECHO.search(target)
+        if echo and not PROMPT_ECHO.search(source):
+            issues.append(TranslationQualityGate._issue(
+                "PROMPT_ECHO", "ERROR", f"Bản dịch chép lại chỉ dẫn của prompt: \"{echo.group(0)}\".",
+            ))
         source_questions = URL_PATTERN.sub(" ", source).count("?")
         target_questions = URL_PATTERN.sub(" ", target).count("?")
         if target_questions > source_questions:
@@ -438,6 +460,9 @@ class TranslationQualityGate:
         source = (source_text or "").strip()
         target = (translated_text or "").strip()
         issues: List[Dict[str, str]] = []
+        if target and target == citation_passthrough(source).strip() and is_bibliographic_citation(source):
+            # Mục chú thích chỉ là trích dẫn tài liệu được giữ nguyên văn (citation_policy).
+            return QualityGateResult(True, False, 1.0, [])
 
         if not target:
             issues.append(self._issue("EMPTY_TRANSLATION", "ERROR", "Bản dịch đang để trống."))

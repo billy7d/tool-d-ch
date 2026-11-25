@@ -150,6 +150,14 @@ def _is_label_heading(text: str) -> bool:
     return bool(_LABEL_HEADING_RE.match(text.strip())) and len(text.split()) <= 3
 
 
+# Số chú thích trong thân bài, dạng " [12]" do bước nhập EPUB/PDF chèn vào: hiện thành chỉ số trên như sách in.
+_NOTE_REF_RE = re.compile(r"\s?\[(\d{1,3})\]")
+
+
+def _note_refs(markup: str) -> str:
+    return _NOTE_REF_RE.sub(r"<sup>\1</sup>", markup)
+
+
 def _heading_join(first: str, second: str) -> str:
     if re.search(r"[.:;!?—–-]$", first):
         return f"{first} {second}"
@@ -276,7 +284,7 @@ class _PlanBuilder:
             return PlanBlock(kind="table", rows=rows)
         if not strip_markers(text).strip():
             return None
-        markup = inline_markup(text)
+        markup = _note_refs(inline_markup(text))
         if node.type == NodeType.QUOTE:
             return PlanBlock(kind="quote", html=markup, text=strip_markers(text))
         if node.type == NodeType.FOOTNOTE:

@@ -53,6 +53,10 @@ def update_node(project_id: str, node_id: str, payload: NodeUpdate):
             if existing and (existing.node_metadata or {}).get("draft_translation"):
                 clear_review_draft(existing)
                 update_dict["node_metadata"] = existing.node_metadata
+            if payload.approval_status == ApprovalStatus.APPROVED and payload.translated_content.strip():
+                # Người dùng duyệt bản dịch của đoạn chờ duyệt: đoạn đã xong. Trước đây trạng thái vẫn là NEEDS_REVIEW
+                # nên tiến độ không bao giờ tới 100% và đoạn vẫn nằm trong hàng chờ duyệt.
+                update_dict["status"] = "TRANSLATED"
         updated = repo.update_node(node_id, **update_dict)
         if not updated:
             raise HTTPException(status_code=404, detail="Không tìm thấy phần tử nội dung (node).")

@@ -138,6 +138,15 @@ def test_draft_reaches_structure_api_and_manual_save_clears_it():
         db = get_project_db(project_id)
         saved = db.query(NodeModel).filter_by(id=f"{project_id}_n").one()
         assert saved.translated_content == "Chào bạn." and "draft_translation" not in (saved.node_metadata or {})
+        assert saved.status == "NEEDS_REVIEW"  # lưu nháp chưa phải là duyệt
+        db.close()
+        response = client.patch(f"/api/projects/{project_id}/structure/nodes/{project_id}_n",
+                                json={"translated_content": "Xin chào bạn.", "approval_status": "APPROVED"})
+        assert response.status_code == 200
+        db = get_project_db(project_id)
+        saved = db.query(NodeModel).filter_by(id=f"{project_id}_n").one()
+        # Duyệt đoạn chờ duyệt thì đoạn đó xong, tiến độ dự án tính đoạn này là đã dịch.
+        assert saved.status == "TRANSLATED" and saved.translated_content == "Xin chào bạn."
         db.close()
     finally:
         client.delete(f"/api/projects/{project_id}")

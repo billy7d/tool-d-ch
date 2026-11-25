@@ -235,7 +235,22 @@ class StructureRepository:
                 )
                 self.db.add(node_model)
                 node_order += 1
-                
+
+        # Ảnh đã trích phải có bản ghi asset: thiếu nó, node ảnh trỏ vào id không tồn tại và mọi bản xuất
+        # (EPUB/MOBI/PDF) đều rơi mất hình. Gộp theo id để lưu lại một tài liệu đọc từ DB không làm mất asset.
+        for asset in canonical_doc.assets:
+            self.db.merge(AssetModel(
+                id=asset.id,
+                project_id=project_id,
+                original_path=asset.original_path,
+                derived_path=asset.derived_path,
+                preview_path=asset.preview_path,
+                source_page=asset.source_page,
+                width=asset.width,
+                height=asset.height,
+                mime_type=asset.mime_type,
+            ))
+
         self.db.commit()
 
     def get_canonical_document(self, project_id: str) -> CanonicalDocument:

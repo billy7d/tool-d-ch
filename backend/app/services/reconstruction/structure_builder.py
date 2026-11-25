@@ -221,13 +221,25 @@ class StructureBuilder:
                             metadata=NodeMetadata(heading_level=min(level, 4), is_bold=True, confidence=confidence, extra=_layout_extra(b)),
                             order_index=node_counter,
                         ))
+                    elif b.get("footnote"):
+                        # Mục chú thích cuối sách (EPUB chuyển từ PDF): "12. ..." giữ số để bản dịch còn tra được.
+                        current_chapter_nodes.append(DocumentNode(
+                            id=f"footnote_{chapter_idx:04d}_{node_counter:05d}",
+                            type=NodeType.FOOTNOTE,
+                            content=cleaned_text,
+                            source_mapping=source_mapping,
+                            metadata=NodeMetadata(footnote_number=str(b.get("footnote_number") or "*"),
+                                                  confidence=confidence, extra=_layout_extra(b)),
+                            order_index=node_counter,
+                        ))
                     else:
                         current_chapter_nodes.append(DocumentNode(
                             id=f"paragraph_{chapter_idx:04d}_{node_counter:05d}",
                             type=NodeType.PARAGRAPH,
                             content=cleaned_text,
                             source_mapping=source_mapping,
-                            metadata=NodeMetadata(list_type="bullet" if b.get("list_item") else None, confidence=confidence),
+                            metadata=NodeMetadata(list_type="bullet" if b.get("list_item") else None, confidence=confidence,
+                                                  extra=_layout_extra(b)),
                             order_index=node_counter,
                         ))
                     node_counter += 1

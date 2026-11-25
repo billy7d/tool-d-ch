@@ -1,4 +1,5 @@
 import copy
+import posixpath
 import re
 import uuid
 from pathlib import Path
@@ -11,6 +12,8 @@ try:
 except ImportError:
     ebooklib = None
     epub = None
+
+from app.services.extractor.pdftohtml_epub import is_pdftohtml_document, reconstruct
 
 _HEADINGS = ("h1", "h2", "h3", "h4", "h5", "h6")
 # Khối chứa chữ của sách. Dịch thử Pro Git: bản cũ chỉ đọc h1-h6 và p nên mất 26% chữ (danh sách, khối code,
@@ -64,11 +67,12 @@ def _inside(element: Tag, names) -> bool:
 class EPUBExtractor:
     def __init__(self, project_dir: Path):
         self.project_dir = project_dir
+        self.reconstruction_stats: Dict[str, int] = {}
         self.assets_dir = project_dir / "assets" / "original"
         self.assets_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _blocks(soup: BeautifulSoup) -> List[Dict[str, Any]]:
+    def _blocks(soup: BeautifulSoup, image_ids: Optional[Dict[str, str]] = None, doc_name: str = "") -> List[Dict[str, Any]]:
         body = soup.body or soup
         blocks: List[Dict[str, Any]] = []
 
@@ -117,7 +121,13 @@ class EPUBExtractor:
             elif tag in _CONTAINERS:
                 add("text", _own_text(element), list_item=tag == "li")
             elif tag == "img":
-                add("image", "", asset_id=str(uuid.uuid4()))
+                # Ảnh phải trỏ đúng asset đã lưu: trước đây mỗi <img> nhận một id ngẫu nhiên không khớp asset nào,
+                # nên mọi ảnh của sách EPUB bị bỏ khi xuất.
+                src = (element.get("src") or "").split("#")[0]
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(doc_name), src)) if src else ""
+                asset_id = (image_ids or {}).get(resolved)
+                if asset_id:
+                    add("image", "", asset_id=asset_id)
         return blocks
 
     def extract_document(self, epub_path: Path) -> Dict[str, Any]:
@@ -138,16 +148,45 @@ class EPUBExtractor:
                 documents.append(spine_item)
         if not documents:
             documents = [item for item in book.get_items() if item.get_type() == ebooklib.ITEM_DOCUMENT]
-        images = [item for item in book.get_items() if item.get_type() == ebooklib.ITEM_IMAGE]
 
-        page_num = 1
-        for item in documents + images:
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
+        # Lưu ảnh trước để <img> trong nội dung trỏ được tới asset theo đường dẫn trong EPUB.
+        image_ids: Dict[str, str] = {}
+        for item in book.get_items():
+            if item.get_type() not in (ebooklib.ITEM_IMAGE, ebooklib.ITEM_COVER):
+                continue
+            asset_id = str(uuid.uuid4())
+            name = item.get_name()
+            suffix = Path(name).suffix.lower() or ".png"
+            img_path = self.assets_dir / f"img_{asset_id[:8]}{suffix}"
+            with open(img_path, "wb") as f:
+                f.write(item.get_content())
+            image_ids[posixpath.normpath(name)] = asset_id
+            assets_data.append({
+                "id": asset_id,
+                "original_path": str(img_path),
+                "source_page": 1,
+                "mime_type": item.media_type or "image/png",
+            })
+
+        raw_documents = [(item, getattr(item, "content", b"") or b"") for item in documents]
+        if any(is_pdftohtml_document(raw) for _, raw in raw_documents):
+            # EPUB Calibre chuyển từ PDF: không có thẻ tiêu đề, đoạn bị cắt theo dòng/trang (xem pdftohtml_epub).
+            soups = []
+            for item, _ in raw_documents:
+                soup = BeautifulSoup(item.get_content(), "html.parser")
+                _prepare(soup)
+                soups.append((posixpath.normpath(item.get_name()), soup))
+            pages_data, self.reconstruction_stats = reconstruct(
+                soups, image_ids, outline_titles=self._outline_titles(book), has_cover=bool(self._cover_names(book)),
+            )
+        else:
+            page_num = 1
+            for item, raw in raw_documents:
                 soup = BeautifulSoup(item.get_content(), "html.parser")
                 # get_content() của ebooklib dựng lại tài liệu với <head/> rỗng; tiêu đề nằm trong nội dung gốc.
-                title_tag: Optional[Tag] = BeautifulSoup(getattr(item, "content", b"") or b"", "html.parser").find("title")
+                title_tag: Optional[Tag] = BeautifulSoup(raw, "html.parser").find("title")
                 _prepare(soup)
-                page_blocks = self._blocks(soup)
+                page_blocks = self._blocks(soup, image_ids, posixpath.normpath(item.get_name()))
                 if page_blocks:
                     pages_data.append({
                         "page_number": page_num,
@@ -158,18 +197,6 @@ class EPUBExtractor:
                     })
                     page_num += 1
 
-            elif item.get_type() == ebooklib.ITEM_IMAGE:
-                asset_id = str(uuid.uuid4())
-                img_path = self.assets_dir / f"img_{asset_id[:8]}.png"
-                with open(img_path, "wb") as f:
-                    f.write(item.get_content())
-                assets_data.append({
-                    "id": asset_id,
-                    "original_path": str(img_path),
-                    "source_page": 1,
-                    "mime_type": "image/png"
-                })
-
         return {
             "page_count": max(len(pages_data), 1),
             "text_pages_count": len(pages_data),
@@ -177,4 +204,60 @@ class EPUBExtractor:
             "pages": pages_data,
             "assets": assets_data,
             "toc": toc_entries,
+            "metadata": self._metadata(book),
         }
+
+    @staticmethod
+    def _metadata(book) -> Dict[str, str]:
+        def first(name: str) -> str:
+            values = book.get_metadata("DC", name) or []
+            return _clean(values[0][0]) if values and values[0] and values[0][0] else ""
+
+        return {"title": first("title"), "author": first("creator"), "language": first("language")}
+
+    @staticmethod
+    def _cover_names(book) -> List[str]:
+        names = []
+        # ebooklib đọc <meta name="cover" content="..."/> của EPUB 2 vào mục "meta" chung, không vào "cover".
+        metas = list(book.get_metadata("OPF", "cover") or []) + [
+            entry for entry in book.get_metadata("OPF", "meta") or [] if (entry[1] or {}).get("name") == "cover"
+        ]
+        for _, attrs in metas:
+            cover_id = (attrs or {}).get("content")
+            item = book.get_item_with_id(cover_id) if cover_id else None
+            if item is not None:
+                names.append(item.get_name())
+        names.extend(item.get_name() for item in book.get_items() if item.get_type() == ebooklib.ITEM_COVER)
+        return names
+
+    @staticmethod
+    def _outline_titles(book) -> List[str]:
+        titles: List[str] = []
+
+        def walk(entries) -> None:
+            for entry in entries or []:
+                if isinstance(entry, (list, tuple)):
+                    head = entry[0]
+                    if getattr(head, "title", None):
+                        titles.append(head.title)
+                    walk(entry[1] if len(entry) > 1 else [])
+                elif getattr(entry, "title", None):
+                    titles.append(entry.title)
+
+        walk(book.toc)
+        return titles
+
+    @staticmethod
+    def cover_image(epub_path: Path) -> Optional[bytes]:
+        """Ảnh bìa khai báo trong EPUB gốc (meta cover hoặc mục cover-image), để làm bìa cho bản dịch."""
+        if epub is None:
+            return None
+        try:
+            book = epub.read_epub(str(epub_path))
+        except Exception:
+            return None
+        for name in EPUBExtractor._cover_names(book):
+            item = book.get_item_with_href(name)
+            if item is not None and item.get_content():
+                return item.get_content()
+        return None

@@ -50,10 +50,21 @@ class ReferenceValidator:
         re.IGNORECASE,
     )
 
+    # Nhãn phần của sách với số La Mã/số ("PART II", "Part 2", "Phần III") so khớp cả hai ngôn ngữ. Mẫu chung chỉ nhận
+    # định danh một chữ cái nên "Phần II" không được đọc ra: trước đây "PART I" -> "PHẦN I" bị coi là thêm tham chiếu,
+    # còn "Part II" -> "Phần II" bị coi là thiếu. "part" tiếng Anh viết thường là danh từ thường ("the part I liked").
+    PART_PATTERN = re.compile(r"(?<!\w)(?:Part|PART|[Pp]hần|PHẦN)\.?\s+(?P<identifier>[IVXLCDM]+|\d+)(?![\w-])")
+
     @classmethod
     def extract(cls, text: str) -> List[ReferenceToken]:
         tokens: List[ReferenceToken] = []
+        part_spans = []
+        for match in cls.PART_PATTERN.finditer(text or ""):
+            part_spans.append(match.span())
+            tokens.append(ReferenceToken(reference_type="SECTION", identifier=match.group("identifier"), raw=match.group(0)))
         for match in cls.REFERENCE_PATTERN.finditer(text or ""):
+            if any(start <= match.start() < end for start, end in part_spans):
+                continue  # đã đọc bằng mẫu nhãn phần
             label = match.group("label").casefold().rstrip(".")
             tokens.append(ReferenceToken(
                 reference_type=cls.ALIASES[label],

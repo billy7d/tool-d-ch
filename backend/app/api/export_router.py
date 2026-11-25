@@ -14,16 +14,23 @@ from app.services.exporter.epub_exporter import EPUBExporter
 from app.services.exporter.mobi_exporter import MOBIExporter
 from app.services.ebook.devices import get_device
 from app.services.ebook.pdf_layout import render_pdf_cover
+from app.services.extractor.epub_extractor import EPUBExtractor
 
 router = APIRouter(prefix="/api/projects/{project_id}/export", tags=["Export"])
 
 
 def _source_cover(db, project_id: str, device: str):
-    """Bìa ebook lấy từ trang 1 của PDF gốc, chỉ khi trang đó là ảnh bìa (không lấy trang chữ tiếng Anh)."""
+    """Bìa ebook lấy từ trang 1 của PDF gốc (chỉ khi trang đó là ảnh bìa, không lấy trang chữ tiếng Anh) hoặc từ ảnh
+    bìa khai báo trong EPUB gốc."""
     try:
         for source in DocumentRepository(db).get_source_documents(project_id):
-            if (source.file_format or "").lower() == "pdf" and Path(source.file_path).exists():
+            if not Path(source.file_path).exists():
+                continue
+            fmt = (source.file_format or "").lower()
+            if fmt == "pdf":
                 return render_pdf_cover(Path(source.file_path), get_device(device), require_image=True)
+            if fmt == "epub":
+                return EPUBExtractor.cover_image(Path(source.file_path))
     except Exception:
         return None
     return None
