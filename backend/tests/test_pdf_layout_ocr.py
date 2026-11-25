@@ -116,6 +116,30 @@ def test_toc_cleanup_and_chapter_title_repair(monkeypatch):
     assert all(u.size <= 12.0 and not u.heading_like for u in out[1:7])
 
 
+def test_replace_tokens_keeps_word_data_aligned():
+    span = Span("Journal øƒ Law,", 12.0, word_confidences=[0.9, 0.3, 0.8],
+                word_boxes=[(0, 0, 90, 30), (100, 0, 130, 30), (140, 0, 200, 30)],
+                word_alternatives=[(), ((50.0, ()),) * 2, ()])
+    positions = PdfLayoutAnalyzer._replace_tokens(span, {1: ["of", "the"], 2: []})
+    assert span.text == "Journal of the"
+    assert positions == [1, 2]
+    assert span.word_confidences == [0.9, 0.9, 0.9]
+    assert span.word_boxes == [(0, 0, 90, 30), (100, 0, 115, 30), (115, 0, 130, 30)]
+    assert span.word_alternatives == [(), (), ()]
+
+
+def test_verify_summary_reports_pages_to_check():
+    analyzer = _analyzer()
+    analyzer.verify_stats = Counter({"flagged": 570, "quick": 50, "fixed": 280, "guessed": 4, "confirmed": 160,
+                                     "kept": 20, "removed": 9, "dropped": 1, "passes": 4})
+    analyzer.unreadable = [(17, "ˆ", "removed", ""), (314, "Š", "guessed", "S"), (308, "dir. 2ø", "unresolved", "")]
+    note = analyzer._verify_summary()
+    assert "570 chữ không đạt" in note and "đã sửa 334 chữ" in note and "bỏ 10 cụm" in note
+    assert note.endswith("còn 2 chữ chưa chắc chắn ở trang 308, 314.")
+    analyzer.verify_stats = Counter()
+    assert analyzer._verify_summary() == ""
+
+
 def test_consistent_collocations_follow_the_majority():
     spans = []
     for _ in range(4):

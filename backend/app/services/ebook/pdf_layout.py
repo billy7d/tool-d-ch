@@ -88,6 +88,7 @@ class Span:
     sup: bool = False
     word_confidences: Optional[List[float]] = None  # chữ OCR: độ tin cậy từng từ (0..1)
     word_alternatives: Optional[list] = None  # chữ OCR: phương án thay thế từng chữ cái (xem OcrLine)
+    word_boxes: Optional[list] = None  # chữ OCR: khung từng từ, pixel trên ảnh trang (PageLayout.ocr_dpi)
 
 
 @dataclass
@@ -162,6 +163,7 @@ class PageLayout:
     scanned: bool = False
     ocr_used: bool = False
     needs_ocr: bool = False
+    ocr_dpi: int = 0  # độ phân giải ảnh trang đã OCR (để cắt lại vùng chữ khi quét lại)
 
 
 @dataclass
@@ -462,6 +464,10 @@ class PdfLayoutAnalyzer:
         self.ocr_repairs = 0
         self.name_fixes = 0
         self.heading_fixes = 0
+        self.verify_stats: Counter = Counter()
+        # (trang, chữ gốc, guessed/removed/unresolved, chữ thay): chữ quét lại mọi cách vẫn không chắc chắn.
+        self.unreadable: List[Tuple[int, str, str, str]] = []
+        self._corrector = None
         self.body_size = 11.0
         self.pitch = 13.0
         self.vocab: set = set()
@@ -785,8 +791,9 @@ class PdfLayoutAnalyzer:
                     same_words = text.split() == ocr_line.text.split()
                     confidences = ocr_line.word_confidences if len(ocr_line.word_confidences) == len(text.split()) else None
                     alternatives = ocr_line.word_alternatives if same_words and ocr_line.word_alternatives else None
+                    boxes = ocr_line.word_boxes if same_words and len(ocr_line.word_boxes) == len(text.split()) else None
                     lines.append(Line([Span(text, size=max(5.0, ocr_line.x_size * scale), word_confidences=confidences,
-                                            word_alternatives=alternatives)],
+                                            word_alternatives=alternatives, word_boxes=boxes)],
                                       x0, y0, x1, y1))
                 if lines:
                     blocks.append(TextBlock(lines, ocr=True))
@@ -802,6 +809,7 @@ class PdfLayoutAnalyzer:
                 layout.items = items
                 layout.char_count = chars
                 layout.ocr_used = True
+                layout.ocr_dpi = dpi
                 layout.needs_ocr = False
                 return
         # Trang gần như không có chữ (ảnh, hình vẽ) hoặc OCR quá kém: giữ ảnh cả trang.
@@ -855,14 +863,10 @@ class PdfLayoutAnalyzer:
             model, (_LINE_BREAK.join(l.text for l in b.lines) for b in all_blocks),
             confident_words=self._confident_ocr_words(ocr_blocks),
         )
+        self._corrector = corrector
         sizes = sorted(l.size for b in ocr_blocks for l in b.lines)
         median = sizes[len(sizes) // 2] if sizes else 0.0
-        def text_span(line: Line) -> Optional[Span]:
-            if len(line.spans) == 1:
-                return line.spans[0]
-            if len(line.spans) == 2 and len(line.spans[0].text.strip()) == 1:
-                return line.spans[1]  # dòng đầu chương có chữ hoa lớn (drop cap) đã ghép vào
-            return None
+        text_span = self._ocr_text_span
 
         corrected: List[Tuple[Span, str]] = []
         for block in ocr_blocks:
@@ -890,6 +894,224 @@ class PdfLayoutAnalyzer:
                 corrected.append((span, before))
         self.spell_fixes = sum(corrector.changes.values())
         self.spell_fixes += self._consistent_collocations(corrected)
+
+    def _verify_summary(self) -> str:
+        """Một dòng báo cáo bước kiểm tra từng chữ (xem _verify_ocr_text) cho phần cảnh báo."""
+        stats = self.verify_stats
+        if not stats.get("flagged"):
+            return ""
+        fixed = stats["quick"] + stats["fixed"] + stats["guessed"]
+        parts = [f"Kiểm tra từng chữ sau OCR: {stats['flagged']} chữ không đạt điều kiện bắt buộc, "
+                 f"đã sửa {fixed} chữ"]
+        if stats.get("passes"):
+            parts[0] += f" (quét lại vùng lỗi {stats['passes']} lượt)"
+        if stats["confirmed"] + stats["kept"]:
+            parts.append(f"giữ {stats['confirmed'] + stats['kept']} chữ hiếm/tên riêng đọc ổn định")
+        if stats["dropped"] + stats["removed"]:
+            parts.append(f"bỏ {stats['dropped'] + stats['removed']} cụm ký tự rác")
+        doubtful = sorted({number for number, _, status, _ in self.unreadable if status in ("guessed", "unresolved")})
+        if doubtful:
+            pages = ", ".join(str(n) for n in doubtful[:12]) + (", …" if len(doubtful) > 12 else "")
+            parts.append(f"còn {sum(1 for u in self.unreadable if u[2] in ('guessed', 'unresolved'))} chữ "
+                         f"chưa chắc chắn ở trang {pages}")
+        return "; ".join(parts) + "."
+
+    @staticmethod
+    def _ocr_text_span(line: Line) -> Optional[Span]:
+        """Span chữ của một dòng OCR (dòng đầu chương có thêm span chữ hoa lớn đứng trước)."""
+        if len(line.spans) == 1:
+            return line.spans[0]
+        if len(line.spans) == 2 and len(line.spans[0].text.strip()) == 1:
+            return line.spans[1]  # dòng đầu chương có chữ hoa lớn (drop cap) đã ghép vào
+        return None
+
+    @staticmethod
+    def _replace_tokens(span: Span, replacements: Dict[int, List[str]], confidence: float = 0.9) -> List[int]:
+        """Thay chữ thứ i của span bằng các chữ mới (rỗng: bỏ chữ), giữ khớp độ tin cậy/khung/phương án thay thế.
+        Trả về vị trí (sau khi thay) của các chữ mới."""
+        tokens = span.text.split()
+        lead = span.text[: len(span.text) - len(span.text.lstrip())]
+        trail = span.text[len(span.text.rstrip()):]
+
+        def aligned(values):
+            return values if values and len(values) == len(tokens) else None
+
+        confs, boxes, alts = aligned(span.word_confidences), aligned(span.word_boxes), aligned(span.word_alternatives)
+        new_tokens: List[str] = []
+        new_confs: list = []
+        new_boxes: list = []
+        new_alts: list = []
+        positions: List[int] = []
+        for index, token in enumerate(tokens):
+            pieces = replacements.get(index, [token])
+            if index in replacements:
+                positions.extend(range(len(new_tokens), len(new_tokens) + len(pieces)))
+            new_tokens.extend(pieces)
+            if index not in replacements:
+                new_confs.append(confs[index] if confs else None)
+                new_boxes.append(boxes[index] if boxes else None)
+                new_alts.append(alts[index] if alts else ())
+                continue
+            new_confs.extend([confidence] * len(pieces))
+            new_alts.extend([()] * len(pieces))
+            if boxes:
+                x0, y0, x1, y1 = boxes[index]
+                step = (x1 - x0) / max(1, len(pieces))
+                new_boxes.extend((int(x0 + k * step), y0, int(x0 + (k + 1) * step), y1) for k in range(len(pieces)))
+        span.text = lead + " ".join(new_tokens) + trail
+        span.word_confidences = new_confs if confs else None
+        span.word_boxes = new_boxes if boxes else None
+        span.word_alternatives = new_alts if alts else None
+        return positions
+
+    def _redo_marks(self, span: Span, positions: Sequence[int]) -> None:
+        """Chữ tiếng Việt vừa thay bằng bản đọc lại: cho bộ sửa dấu xét lại theo ngữ cảnh, chỉ ở những vị trí đó.
+        Bản "eng" không có dấu ("0à" -> "va"), còn bản "vie" đọc chữ nghiêng hay sai dấu ("Tuân báo" -> "Tuần báo",
+        "dưng rào cản" -> "dựng rào cản")."""
+        from app.services.ebook.vi_spell import skeleton
+
+        if not self._corrector or not positions:
+            return
+        tokens = span.text.split()
+        confidences = [0.5 if i in positions else 0.95 for i in range(len(tokens))]
+        corrected = self._corrector.correct_tokens(span.text.strip(), confidences=confidences).split()
+        if len(corrected) != len(tokens):
+            return
+        changes = {i: [corrected[i]] for i in positions
+                   if i < len(tokens) and corrected[i] != tokens[i] and skeleton(corrected[i]) == skeleton(tokens[i])}
+        if changes:
+            self._replace_tokens(span, changes)
+            self.verify_stats["marks"] += len(changes)
+
+    def _verify_ocr_text(self, pdf_path: Path, pages: Sequence[PageLayout]) -> None:
+        """Điều kiện bắt buộc cho từng chữ OCR: sửa ngay chữ lỗi chắc chắn, rồi quét lại các vùng chữ lỗi theo
+        từng lượt cho tới khi không còn lỗi (xem ocr_verify). Chạy sau khi bỏ đầu trang và sửa dấu."""
+        ocr_pages = [p for p in pages if p.ocr_used and p.ocr_dpi]
+        if not ocr_pages or not self.ocr.is_available:
+            return
+        from app.services.ebook import ocr_verify as ov
+        from app.services.ebook.ocr_repair import core_of
+        from app.services.ebook.toc_repair import is_page_ref
+        from app.services.ebook.vi_spell import VietSyllableModel
+
+        self.progress(0.71, "Kiểm tra từng chữ sau OCR")
+        model = VietSyllableModel.shared() if self.ocr_lang.startswith("vie") else VietSyllableModel(Counter(), Counter())
+        blocks = [it for p in ocr_pages for it in p.items if isinstance(it, TextBlock) and it.ocr]
+        accepted = self._confident_ocr_words(blocks)
+        vocab: Counter = Counter(
+            core_of(t).lower() for b in blocks for l in b.lines for s in l.spans for t in s.text.split())
+        stats = self.verify_stats
+
+        def confidences_of(span: Span, tokens: List[str]) -> Optional[list]:
+            values = span.word_confidences
+            return values if values and len(values) == len(tokens) else None
+
+        def find_errors(span: Span, previous_hyphen: bool) -> Dict[int, str]:
+            tokens = span.text.split()
+            confs = confidences_of(span, tokens)
+            reasons: Dict[int, str] = {}
+            for index, token in enumerate(tokens):
+                if (index == 0 and previous_hyphen and token[:1].islower() and token.rstrip(".,;:!?").isalpha()) or (
+                        index == len(tokens) - 1 and len(token) > 1 and token.endswith("-")
+                        and token[:-1].replace("-", "").isalpha()):
+                    continue  # mảnh của chữ ngắt dòng ("Kahne-" / "man")
+                if index == len(tokens) - 1 and is_page_ref(token) and any(ch in "»«§£$¢" for ch in token):
+                    continue  # số trang cuối dòng mục lục đọc sai ("b»)"): bước dọn mục lục bỏ đi
+                reason = ov.check_token(token, model, confs[index] if confs else None, accepted)
+                if reason:
+                    reasons[index] = reason
+            return reasons
+
+        todo: Dict[int, List[Tuple[Span, Line, Dict[int, str]]]] = defaultdict(list)
+        for page in ocr_pages:
+            for block in page.items:
+                if not isinstance(block, TextBlock) or not block.ocr:
+                    continue
+                after_hyphen = False
+                for line in block.lines:
+                    span = self._ocr_text_span(line)
+                    tokens = span.text.split() if span else []
+                    if not tokens:
+                        after_hyphen = False
+                        continue
+                    previous_hyphen, after_hyphen = after_hyphen, tokens[-1].endswith("-")
+                    reasons = find_errors(span, previous_hyphen)
+                    if not reasons:
+                        continue
+                    stats["flagged"] += len(reasons)
+                    quick = {i: ov.quick_fix(tokens[i], model) for i in reasons}
+                    quick = {i: fixed.split() for i, fixed in quick.items() if fixed}
+                    joins = ov.join_split_words(tokens, reasons, model)
+                    for i in [i for i, pieces in joins.items() if pieces]:
+                        if i not in quick and i + 1 not in quick:
+                            quick[i], quick[i + 1] = joins[i], []
+                    if quick:
+                        stats["quick"] += sum(1 for pieces in quick.values() if pieces)  # hai mảnh nối lại tính một
+                        self._replace_tokens(span, quick)
+                        # Một chữ tách thành hai làm lệch chỉ số: kiểm tra lại các chữ còn lỗi.
+                        tokens = span.text.split()
+                        reasons = find_errors(span, previous_hyphen)
+                    if reasons and span.word_boxes and len(span.word_boxes) == len(tokens) and all(span.word_boxes):
+                        todo[page.number].append((span, line, reasons))
+                    elif reasons:
+                        stats["no_boxes"] += len(reasons)
+        if not todo:
+            return
+        try:
+            doc = pymupdf.open(str(pdf_path))
+        except Exception:
+            return
+        dpi_of = {p.number: p.ocr_dpi for p in ocr_pages}
+
+        def line_jobs():
+            """Cắt các dòng có chữ lỗi, từng trang một (render ở luồng này; các lô đã đủ dòng được đọc song song)."""
+            for number in sorted(todo):
+                dpi = dpi_of[number]
+                try:
+                    image = self._render_for_ocr(doc[number - 1], dpi)
+                except Exception:
+                    continue
+                scale = dpi / 72.0
+                for span, line, reasons in todo[number]:
+                    box = (line.x0 * scale, line.y0 * scale, line.x1 * scale, line.y1 * scale)
+                    yield ov.line_job(image, box, dpi, span.text.split(), span.word_boxes, reasons, key=(number, span))
+
+        def recognize(im: Image.Image, lang: str, resolution: int) -> OcrPage:
+            return self.ocr.recognize_image(im, lang, resolution, True, psm=6)
+
+        def progress(number: int, total: int, remaining: int) -> None:
+            if remaining:
+                stats["passes"] = number
+                self.progress(0.71, f"Quét lại {remaining} chữ lỗi (lượt {number}/{total})")
+
+        workers = max(1, os.cpu_count() or 2)
+        try:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ocr-verify") as pool:
+                jobs, outcome = ov.rescan(line_jobs(), recognize, model, vocab, accepted, executor=pool,
+                                          progress=progress)
+        finally:
+            doc.close()
+        for status, count in outcome.items():
+            stats[status] += count
+        for job in jobs:
+            number, span = job.key
+            replacements: Dict[int, List[str]] = {}
+            for region in job.regions:
+                if region.status in ("fixed", "dropped", "guessed", "removed"):
+                    replacements[region.first] = region.result.split() if region.result else []
+                    for index in range(region.first + 1, region.last + 1):
+                        replacements[index] = []
+                if region.status in ("guessed", "removed", "unresolved"):
+                    self.unreadable.append((number, region.original, region.status, region.result or ""))
+            positions = self._replace_tokens(span, replacements) if replacements else []
+            # Chữ giữ nguyên mà không có trong từ điển ("tiển", "dúng"): bộ sửa dấu xét lại theo ngữ cảnh.
+            shift = 0
+            for region in sorted(job.regions, key=lambda r: r.first):
+                if region.status == "kept":
+                    positions.extend(range(region.first + shift, region.last + 1 + shift))
+                if region.status in ("fixed", "dropped", "guessed", "removed"):
+                    shift += len(region.result.split() if region.result else []) - (region.last - region.first + 1)
+            self._redo_marks(span, sorted(set(positions)))
 
     @staticmethod
     def _consistent_collocations(corrected: Sequence[Tuple[Span, str]]) -> int:
@@ -2065,6 +2287,7 @@ class PdfLayoutAnalyzer:
         # Sửa dấu sau khi bỏ đầu trang: đầu trang lặp lại trên mọi trang ("MỘT VÁN POKER" đọc thành "VẤN POKER")
         # sẽ làm sai thống kê của chính cuốn sách mà bộ sửa dựa vào.
         self._spell_check_ocr(pages)
+        self._verify_ocr_text(pdf_path, pages)
         metrics = self._page_metrics(pages)
         self.pitch = self._compute_pitch(pages)
         style = self._detect_style(pages, metrics)
@@ -2222,6 +2445,9 @@ class PdfLayoutAnalyzer:
                 f"{ocr_pages} trang scan đã được nhận dạng chữ bằng Tesseract ({lang_label}{fixed_note}); "
                 "chữ in nghiêng và tiêu đề phông trang trí có thể còn sai, nên đọc soát."
             )
+            verify_note = self._verify_summary()
+            if verify_note:
+                warnings.append(verify_note)
         if not any(b["type"] != "image" for p in out_pages.values() for b in p["blocks"]):
             warnings.append("Không tìm thấy chữ trong PDF: sách chỉ gồm ảnh trang.")
 

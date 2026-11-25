@@ -178,11 +178,20 @@ def suspicious_line(words: Sequence[str], confidences: Sequence[float], model: V
 
 
 def shear(image: Image.Image, k: float) -> Image.Image:
-    """Nắn thẳng chữ nghiêng sang phải: dịch mỗi hàng điểm ảnh sang trái tỷ lệ với độ cao."""
+    """Nắn thẳng chữ nghiêng sang phải: hàng điểm ảnh ở độ sâu y dịch sang phải k*y, tức phần trên của chữ lùi
+    về trái so với chân chữ. Ảnh rộng thêm k*cao để không mất chữ (điểm (x, y) của ảnh nắn là x - k*y trên ảnh gốc).
+
+    Bản trước dịch phần trên sang trái và cắt mất mép trái của các dòng phía trên: ảnh ghép nhiều dòng càng cao
+    thì càng mất nhiều chữ."""
     width, height = image.size
     extra = int(abs(k) * height) + 2
-    return image.transform((width + extra, height), Image.AFFINE, (1, -k, k * height, 0, 1, 0),
+    return image.transform((width + extra, height), Image.AFFINE, (1, -k, 0, 0, 1, 0),
                            resample=Image.BICUBIC, fillcolor=255)
+
+
+def unshear_x(x: float, y: float, k: float) -> float:
+    """Toạ độ x trên ảnh gốc của điểm (x, y) trên ảnh đã nắn bằng shear(..., k)."""
+    return x - k * y
 
 
 @dataclass
@@ -230,8 +239,8 @@ def read_back(result_lines, placed: Sequence[_Placed], sheared: float = 0.0, can
             if index is None:
                 continue
             item = placed[index]
-            # Ảnh đã nắn: điểm (x, y) trên ảnh nắn ứng với x + k*(H - y) trên ảnh gốc.
-            shift = sheared * (canvas_height - yc) if sheared else 0.0
+            # Ảnh đã nắn: điểm (x, y) trên ảnh nắn ứng với x - k*y trên ảnh gốc (xem shear).
+            shift = -sheared * yc if sheared else 0.0
             px0 = x0 + shift - _GAP + item.box[0]
             px1 = x1 + shift - _GAP + item.box[0]
             out.setdefault(index, []).append(
